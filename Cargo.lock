@@ -5520,6 +5520,7 @@ dependencies = [
  "db",
  "edit_prediction_types",
  "emojis",
+ "extension",
  "feature_flags",
  "file_icons",
  "fs",

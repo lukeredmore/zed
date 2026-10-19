@@ -545,6 +545,41 @@ impl TryFrom<ContextServerConfiguration> for extension::ContextServerConfigurati
     }
 }
 
+impl From<editor::TextHighlight> for extension::TextHighlight {
+    fn from(value: editor::TextHighlight) -> Self {
+        Self {
+            range: value.range.into(),
+            color: value.color,
+            background_color: value.background_color,
+            font_weight: value.font_weight,
+            italic: value.italic,
+            underline: value.underline,
+            strikethrough: value.strikethrough,
+            fade_out: value.fade_out,
+        }
+    }
+}
+
+impl From<editor::RowHighlight> for extension::RowHighlight {
+    fn from(value: editor::RowHighlight) -> Self {
+        Self {
+            start_row: value.start_row,
+            end_row: value.end_row,
+            color: value.color,
+            should_autoscroll: value.should_autoscroll,
+        }
+    }
+}
+
+impl From<editor::EditorHighlights> for extension::EditorHighlights {
+    fn from(value: editor::EditorHighlights) -> Self {
+        Self {
+            text_highlights: value.text_highlights.into_iter().map(Into::into).collect(),
+            row_highlights: value.row_highlights.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl HostKeyValueStore for WasmState {
     async fn insert(
         &mut self,
@@ -1161,3 +1196,5 @@ impl ExtensionImports for WasmState {
             .to_wasmtime_result()
     }
 }
+
+impl editor::Host for WasmState {}

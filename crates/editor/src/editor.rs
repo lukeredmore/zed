@@ -1580,10 +1580,27 @@ impl Default for RowHighlightOptions {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RowHighlightColor {
+    Fn(fn(&App) -> Hsla),
+    Constant(Hsla),
+}
+
+impl RowHighlightColor {
+    fn resolve(self, cx: &App) -> Hsla {
+        match self {
+            Self::Fn(f) => f(cx),
+            Self::Constant(color) => color,
+        }
+    }
+}
+
+pub struct ExtensionRowHighlights;
+
 struct RowHighlight {
     index: usize,
     range: Range<Anchor>,
-    color: fn(&App) -> Hsla,
+    color: RowHighlightColor,
     options: RowHighlightOptions,
     type_id: TypeId,
 }
@@ -9316,6 +9333,27 @@ impl Editor {
         options: RowHighlightOptions,
         cx: &mut Context<Self>,
     ) {
+        self.insert_row_highlight::<T>(range, RowHighlightColor::Fn(color), options, cx);
+    }
+
+    /// Adds a row highlight for the given range using a constant color.
+    pub fn highlight_rows_with_color<T: 'static>(
+        &mut self,
+        range: Range<Anchor>,
+        color: Hsla,
+        options: RowHighlightOptions,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_row_highlight::<T>(range, RowHighlightColor::Constant(color), options, cx);
+    }
+
+    fn insert_row_highlight<T: 'static>(
+        &mut self,
+        range: Range<Anchor>,
+        color: RowHighlightColor,
+        options: RowHighlightOptions,
+        cx: &mut Context<Self>,
+    ) {
         let snapshot = self.buffer().read(cx).snapshot(cx);
         let row_highlights = self.highlighted_rows.entry(TypeId::of::<T>()).or_default();
         let ix = row_highlights.binary_search_by(|highlight| {
@@ -9432,7 +9470,7 @@ impl Editor {
             .get(&TypeId::of::<T>())
             .map_or(&[] as &[_], |highlights| highlights.as_slice())
             .iter()
-            .map(|highlight| (highlight.range.clone(), (highlight.color)(cx)))
+            .map(|highlight| (highlight.range.clone(), highlight.color.resolve(cx)))
     }
 
     /// Merges all anchor ranges for all context types ever set, picking the last highlight added in case of a row conflict.
@@ -9545,7 +9583,7 @@ impl Editor {
                                 LineHighlight {
                                     include_gutter: highlight.options.include_gutter,
                                     border: None,
-                                    background: (highlight.color)(cx).into(),
+                                    background: highlight.color.resolve(cx).into(),
                                     type_id: Some(highlight.type_id),
                                 },
                             );
@@ -9994,6 +10032,72 @@ impl Editor {
             .update(cx, |map, _| map.clear_highlights_with(f));
         if cleared {
             cx.notify();
+        }
+    }
+
+    pub fn clear_extension_highlights(&mut self, cx: &mut Context<Self>) {
+        self.clear_row_highlights::<ExtensionRowHighlights>();
+        self.clear_highlights_with(&mut |key| matches!(key, HighlightKey::Extension(_)), cx);
+    }
+
+    pub fn apply_extension_highlights(
+        &mut self,
+        highlights: &extension::EditorHighlights,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_extension_highlights(cx);
+        let snapshot = self.buffer().read(cx).snapshot(cx);
+
+        for (index, text_highlight) in highlights.text_highlights.iter().enumerate() {
+            let start = snapshot.anchor_before(MultiBufferOffset(text_highlight.range.start));
+            let end = snapshot.anchor_after(MultiBufferOffset(text_highlight.range.end));
+            let color = text_highlight.color.map(|rgba| gpui::rgba(rgba).into());
+            let background_color = text_highlight
+                .background_color
+                .map(|rgba| gpui::rgba(rgba).into());
+            let style = HighlightStyle {
+                color,
+                background_color,
+                font_weight: text_highlight
+                    .font_weight
+                    .map(|weight| FontWeight(weight.clamp(100, 900) as f32)),
+                font_style: text_highlight.italic.then_some(FontStyle::Italic),
+                underline: text_highlight.underline.then(|| UnderlineStyle {
+                    thickness: px(1.0),
+                    color,
+                    wavy: false,
+                }),
+                strikethrough: text_highlight
+                    .strikethrough
+                    .then(|| gpui::StrikethroughStyle {
+                        thickness: px(1.0),
+                        color,
+                    }),
+                fade_out: text_highlight.fade_out.then_some(-0.45),
+                ..Default::default()
+            };
+            self.highlight_text(HighlightKey::Extension(index), vec![start..end], style, cx);
+        }
+
+        let max_point = snapshot.max_point();
+        for row_highlight in &highlights.row_highlights {
+            let start_row = row_highlight.start_row.min(max_point.row);
+            let end_row = row_highlight.end_row.min(max_point.row);
+            let start = snapshot.anchor_before(Point::new(start_row, 0));
+            let end = snapshot.anchor_after(Point::new(
+                end_row,
+                snapshot.line_len(MultiBufferRow(end_row)),
+            ));
+            let color: Hsla = gpui::rgba(row_highlight.color).into();
+            self.highlight_rows_with_color::<ExtensionRowHighlights>(
+                start..end,
+                color,
+                RowHighlightOptions {
+                    autoscroll: row_highlight.should_autoscroll,
+                    include_gutter: true,
+                },
+                cx,
+            );
         }
     }
 

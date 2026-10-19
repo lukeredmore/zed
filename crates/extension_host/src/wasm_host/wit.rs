@@ -1285,6 +1285,30 @@ impl Extension {
             )),
         }
     }
+
+    pub async fn call_editor_highlights_for_buffer(
+        &self,
+        store: &mut Store<WasmState>,
+        language_name: &LanguageName,
+        text: &str,
+        cursor_offset: u32,
+    ) -> wasmtime::Result<Result<extension::EditorHighlights, String>> {
+        match self {
+            Extension::V0_8_0(ext) => Ok(ext
+                .call_editor_highlights_for_buffer(store, &language_name.0, text, cursor_offset)
+                .await?
+                .map(Into::into)),
+            Extension::V0_6_0(_)
+            | Extension::V0_5_0(_)
+            | Extension::V0_4_0(_)
+            | Extension::V0_3_0(_)
+            | Extension::V0_2_0(_)
+            | Extension::V0_1_0(_)
+            | Extension::V0_0_6(_)
+            | Extension::V0_0_4(_)
+            | Extension::V0_0_1(_) => Ok(Ok(extension::EditorHighlights::default())),
+        }
+    }
 }
 
 trait IntoWasmtimeResult<T> {
