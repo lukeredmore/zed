@@ -148,16 +148,7 @@ impl Minimap {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct Gutter {
-    pub min_line_number_digits: usize,
-    pub line_numbers: bool,
-    pub runnables: bool,
-    pub breakpoints: bool,
-    pub bookmarks: bool,
-    pub folds: bool,
-    pub git_gutter_width: settings::GitGutterWidth,
-}
+pub type Gutter = language::language_settings::GutterSettings;
 
 /// Forcefully enable or disable the scrollbar for each axis
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -218,7 +209,7 @@ impl Settings for EditorSettings {
         let cursor_animation = editor.cursor_animation.unwrap();
         let scrollbar = editor.scrollbar.unwrap();
         let minimap = editor.minimap.unwrap();
-        let gutter = editor.gutter.unwrap();
+        let gutter = content.project.all_languages.defaults.gutter.clone().unwrap();
         let axes = scrollbar.axes.unwrap();
         let toolbar = editor.toolbar.unwrap();
         let search = editor.search.unwrap();

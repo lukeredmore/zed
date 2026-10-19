@@ -7,8 +7,8 @@ use settings_macros::{MergeFrom, with_fallible_options};
 use std::sync::Arc;
 
 use crate::{
-    DelayMs, DocumentFoldingRanges, DocumentSymbols, ExtendingSet, SemanticTokens, SplicingVec,
-    merge_from,
+    DelayMs, DocumentFoldingRanges, DocumentSymbols, ExtendingSet, GutterContent, SemanticTokens,
+    SplicingVec, merge_from,
 };
 
 /// The state of the modifier keys at some point in time
@@ -599,6 +599,8 @@ pub struct LanguageSettingsContent {
     pub wrap_guides: Option<Vec<usize>>,
     /// Indent guide related settings.
     pub indent_guides: Option<IndentGuideSettingsContent>,
+    /// Gutter related settings.
+    pub gutter: Option<GutterContent>,
     /// Whether or not to perform a buffer format before saving.
     ///
     /// Default: off

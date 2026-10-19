@@ -2349,14 +2349,18 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.line_numbers"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.line_numbers.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .get_or_insert_default()
                             .line_numbers = value;
@@ -2387,14 +2391,18 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.runnables"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.runnables.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .get_or_insert_default()
                             .runnables = value;
@@ -2411,14 +2419,18 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.breakpoints"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.breakpoints.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .get_or_insert_default()
                             .breakpoints = value;
@@ -2435,14 +2447,18 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.bookmarks"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.bookmarks.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .get_or_insert_default()
                             .bookmarks = value;
@@ -2459,13 +2475,21 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.folds"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.folds.as_ref())
                     },
                     write: |settings_content, value, _| {
-                        settings_content.editor.gutter.get_or_insert_default().folds = value;
+                        settings_content
+                            .project
+                            .all_languages
+                            .defaults
+                            .gutter
+                            .get_or_insert_default()
+                            .folds = value;
                     },
                 }),
                 metadata: None,
@@ -2479,14 +2503,18 @@ fn editor_page() -> SettingsPage {
                     json_path: Some("gutter.min_line_number_digits"),
                     pick: |settings_content| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()
                             .and_then(|gutter| gutter.min_line_number_digits.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .get_or_insert_default()
                             .min_line_number_digits = value;
@@ -2505,7 +2533,9 @@ fn editor_page() -> SettingsPage {
                         pick: |settings_content| {
                             Some(
                                 &dynamic_variants::<settings::GitGutterWidth>()[settings_content
-                                    .editor
+                                    .project
+                                    .all_languages
+                                    .defaults
                                     .gutter
                                     .as_ref()?
                                     .git_gutter_width
@@ -2515,7 +2545,12 @@ fn editor_page() -> SettingsPage {
                             )
                         },
                         write: |settings_content, value, _| {
-                            let gutter = settings_content.editor.gutter.get_or_insert_default();
+                            let gutter = settings_content
+                                .project
+                                .all_languages
+                                .defaults
+                                .gutter
+                                .get_or_insert_default();
                             gutter.git_gutter_width = value.map(|value| match value {
                                 settings::GitGutterWidthDiscriminants::Default => {
                                     settings::GitGutterWidth::Default
@@ -2538,7 +2573,9 @@ fn editor_page() -> SettingsPage {
                 pick_discriminant: |settings_content| {
                     Some(
                         settings_content
-                            .editor
+                            .project
+                            .all_languages
+                            .defaults
                             .gutter
                             .as_ref()?
                             .git_gutter_width
@@ -2558,7 +2595,9 @@ fn editor_page() -> SettingsPage {
                                 organization_override: None,
                                 json_path: Some("gutter.git_gutter_width"),
                                 pick: |settings_content| match settings_content
-                                    .editor
+                                    .project
+                                    .all_languages
+                                    .defaults
                                     .gutter
                                     .as_ref()
                                     .and_then(|gutter| gutter.git_gutter_width.as_ref())
@@ -2572,7 +2611,9 @@ fn editor_page() -> SettingsPage {
                                     };
                                     if let Some(settings::GitGutterWidth::Custom(width)) =
                                         settings_content
-                                            .editor
+                                            .project
+                                            .all_languages
+                                            .defaults
                                             .gutter
                                             .as_mut()
                                             .and_then(|gutter| gutter.git_gutter_width.as_mut())

@@ -1292,6 +1292,7 @@ pub struct EditorSnapshot {
     show_runnables: Option<bool>,
     show_breakpoints: Option<bool>,
     show_bookmarks: Option<bool>,
+    pub gutter_settings: language_settings::GutterSettings,
     git_blame_gutter_max_author_length: Option<usize>,
     pub display_snapshot: DisplaySnapshot,
     pub placeholder_display_snapshot: Option<DisplaySnapshot>,
@@ -3185,6 +3186,7 @@ impl Editor {
             show_runnables: self.show_runnables,
             show_bookmarks: self.show_bookmarks,
             show_breakpoints: self.show_breakpoints,
+            gutter_settings: self.buffer.read(cx).language_settings(cx).gutter,
             git_blame_gutter_max_author_length,
             scroll_anchor: self.scroll_manager.shared_scroll_anchor(cx),
             display_snapshot,
@@ -4822,7 +4824,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> IconButton {
-        let gutter_settings = EditorSettings::get_global(cx).gutter;
+        let gutter_settings = self.buffer.read(cx).language_settings(cx).gutter;
         let show_bookmarks = self.show_bookmarks.unwrap_or(gutter_settings.bookmarks);
         let show_breakpoints = self.show_breakpoints.unwrap_or(gutter_settings.breakpoints);
 
@@ -12420,7 +12422,7 @@ impl EditorSnapshot {
                     GitGutterSetting::TrackedFiles
                 )
             });
-            let gutter_settings = EditorSettings::get_global(cx).gutter;
+            let gutter_settings = self.gutter_settings;
             let show_line_numbers = self
                 .show_line_numbers
                 .unwrap_or(gutter_settings.line_numbers);

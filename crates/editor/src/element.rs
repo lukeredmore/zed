@@ -2786,7 +2786,14 @@ impl EditorElement {
             .ilog10()
             + 1;
 
-        let git_gutter_width = Self::gutter_strip_width(line_height, cx)
+        let gutter_settings = self
+            .editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .language_settings(cx)
+            .gutter;
+        let git_gutter_width = Self::gutter_strip_width(gutter_settings.git_gutter_width, line_height)
             + gutter_dimensions
                 .git_blame_entries_width
                 .unwrap_or_default();
@@ -2809,7 +2816,7 @@ impl EditorElement {
 
                 let editor = self.editor.clone();
                 let is_wide = max_line_number_length
-                    >= EditorSettings::get_global(cx).gutter.min_line_number_digits as u32
+                    >= gutter_settings.min_line_number_digits as u32
                     && row_info
                         .buffer_row
                         .is_some_and(|row| (row + 1).ilog10() + 1 == max_line_number_length)
@@ -2860,7 +2867,7 @@ impl EditorElement {
         let include_line_numbers = gutter
             .snapshot
             .show_line_numbers
-            .unwrap_or_else(|| EditorSettings::get_global(cx).gutter.line_numbers);
+            .unwrap_or(gutter.snapshot.gutter_settings.line_numbers);
         if !include_line_numbers {
             return Arc::default();
         }
@@ -2975,7 +2982,7 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<Option<AnyElement>> {
-        let include_fold_statuses = EditorSettings::get_global(cx).gutter.folds
+        let include_fold_statuses = snapshot.gutter_settings.folds
             && snapshot.mode.is_full()
             && snapshot.display_snapshot.companion_snapshot().is_none()
             && self.editor.read(cx).buffer_kind(cx) == ItemBufferKind::Singleton;
@@ -5441,8 +5448,8 @@ impl EditorElement {
     const DELETED_MARKER_WIDTH_RATIO: f32 = 0.35 / Self::DEFAULT_STRIP_WIDTH_RATIO;
     const MIN_DELETED_MARKER_WIDTH_RATIO: f32 = 0.2;
 
-    fn gutter_strip_width(line_height: Pixels, cx: &App) -> Pixels {
-        match EditorSettings::get_global(cx).gutter.git_gutter_width {
+    fn gutter_strip_width(setting: GitGutterWidth, line_height: Pixels) -> Pixels {
+        match setting {
             GitGutterWidth::Custom(width) => px(*width),
             GitGutterWidth::Default => (Self::DEFAULT_STRIP_WIDTH_RATIO * line_height).floor(),
         }
@@ -5473,10 +5480,11 @@ impl EditorElement {
         gutter_bounds: Bounds<Pixels>,
         hunk: &DisplayDiffHunk,
         snapshot: &EditorSnapshot,
-        cx: &App,
+        _cx: &App,
     ) -> Bounds<Pixels> {
         let scroll_top = scroll_position.y * ScrollPixelOffset::from(line_height);
-        let gutter_strip_width = Self::gutter_strip_width(line_height, cx);
+        let gutter_strip_width =
+            Self::gutter_strip_width(snapshot.gutter_settings.git_gutter_width, line_height);
 
         match hunk {
             DisplayDiffHunk::Folded { display_row, .. } => {
@@ -5503,7 +5511,7 @@ impl EditorElement {
                     let end_y = start_y + line_height;
 
                     let width = Self::deleted_marker_base_width(
-                        EditorSettings::get_global(cx).gutter.git_gutter_width,
+                        snapshot.gutter_settings.git_gutter_width,
                         line_height,
                     );
                     let highlight_origin = gutter_bounds.origin + point(px(0.), start_y);
@@ -7043,8 +7051,10 @@ impl Gutter<'_> {
             AvailableSpace::Definite(self.line_height),
         );
         let indicator_size = button.layout_as_root(available_space, window, cx);
-        let git_gutter_width = EditorElement::gutter_strip_width(self.line_height, cx)
-            + self.dimensions.git_blame_entries_width.unwrap_or_default();
+        let git_gutter_width = EditorElement::gutter_strip_width(
+            self.snapshot.gutter_settings.git_gutter_width,
+            self.line_height,
+        ) + self.dimensions.git_blame_entries_width.unwrap_or_default();
 
         let x = git_gutter_width + px(2.);
 
@@ -9588,7 +9598,7 @@ impl Element for EditorElement {
                         cx,
                     );
 
-                    let gutter_settings = EditorSettings::get_global(cx).gutter;
+                    let gutter_settings = snapshot.gutter_settings;
 
                     let context_menu_layout =
                         if let Some(newest_selection_head) = newest_selection_head {
@@ -9687,10 +9697,11 @@ impl Element for EditorElement {
                         );
                     }
 
-                    let git_gutter_width = Self::gutter_strip_width(line_height, cx)
-                        + gutter_dimensions
-                            .git_blame_entries_width
-                            .unwrap_or_default();
+                    let git_gutter_width =
+                        Self::gutter_strip_width(gutter_settings.git_gutter_width, line_height)
+                            + gutter_dimensions
+                                .git_blame_entries_width
+                                .unwrap_or_default();
                     let available_width = gutter_dimensions.left_padding - git_gutter_width;
 
                     let max_line_number_length = self
@@ -9712,8 +9723,7 @@ impl Element for EditorElement {
                         )
                         .map(|(display_row, buffer_row)| {
                             let is_wide = max_line_number_length
-                                >= EditorSettings::get_global(cx).gutter.min_line_number_digits
-                                    as u32
+                                >= gutter_settings.min_line_number_digits as u32
                                 && buffer_row.is_some_and(|row| {
                                     (row + 1).ilog10() + 1 == max_line_number_length
                                 })
@@ -12125,7 +12135,13 @@ mod tests {
         cx.update(|cx| {
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.editor.gutter.get_or_insert_default().folds = Some(false);
+                    settings
+                        .project
+                        .all_languages
+                        .defaults
+                        .gutter
+                        .get_or_insert_default()
+                        .folds = Some(false);
                 });
             });
         });
@@ -12156,7 +12172,13 @@ mod tests {
         cx.update(|cx| {
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.editor.gutter.get_or_insert_default().folds = Some(false);
+                    settings
+                        .project
+                        .all_languages
+                        .defaults
+                        .gutter
+                        .get_or_insert_default()
+                        .folds = Some(false);
                     settings.editor.sticky_scroll = Some(settings::StickyScrollContent {
                         enabled: Some(true),
                     });
