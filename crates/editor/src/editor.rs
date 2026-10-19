@@ -1245,6 +1245,8 @@ pub struct Editor {
     sticky_headers_task: Task<()>,
     sticky_headers: Option<Vec<OutlineItem<Anchor>>>,
     pub(crate) colorize_brackets_task: Task<()>,
+    extension_crease_ids: Vec<CreaseId>,
+    extension_block_ids: HashSet<CustomBlockId>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1596,6 +1598,120 @@ impl RowHighlightColor {
 }
 
 pub struct ExtensionRowHighlights;
+pub struct ExtensionInlineFold;
+
+fn render_extension_canvas_element(
+    canvas_element: &extension::CanvasElement,
+    editor: WeakEntity<Editor>,
+) -> AnyElement {
+    let width = px(canvas_element.width);
+    let height = px(canvas_element.height);
+    let quads = canvas_element.quads.clone();
+    let glyph_runs = canvas_element.glyph_runs.clone();
+
+    let inner = gpui::canvas(
+        move |_bounds, window, cx| {
+            let buffer_font = &ThemeSettings::get_global(cx).buffer_font;
+            let mut shaped_runs = Vec::with_capacity(glyph_runs.len());
+            for run in &glyph_runs {
+                let text: SharedString = run.text.clone().into();
+                let font_size = px(run.font_size);
+                let font_family = if run.monospace {
+                    let text_system = cx.text_system();
+                    let font_id = text_system.resolve_font(buffer_font);
+                    let i_advance = text_system.advance(font_id, px(14.0), 'i').ok();
+                    let m_advance = text_system.advance(font_id, px(14.0), 'm').ok();
+                    if matches!((i_advance, m_advance), (Some(i), Some(m)) if (i.width - m.width).abs() < px(0.01))
+                    {
+                        buffer_font.family.clone()
+                    } else {
+                        ".ZedMono".into()
+                    }
+                } else {
+                    buffer_font.family.clone()
+                };
+                let font = gpui::Font {
+                    family: font_family,
+                    features: gpui::FontFeatures::default(),
+                    fallbacks: None,
+                    weight: run
+                        .font_weight
+                        .map(|w| gpui::FontWeight(w as f32))
+                        .unwrap_or(gpui::FontWeight::NORMAL),
+                    style: if run.italic {
+                        gpui::FontStyle::Italic
+                    } else {
+                        gpui::FontStyle::Normal
+                    },
+                };
+                let text_run = gpui::TextRun {
+                    len: text.len(),
+                    font,
+                    color: gpui::Hsla::from(gpui::rgba(run.color)),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = window
+                    .text_system()
+                    .shape_line(text, font_size, &[text_run], None);
+                shaped_runs.push((point(px(run.x), px(run.y)), font_size, shaped));
+            }
+            shaped_runs
+        },
+        move |bounds, shaped_runs, window, cx| {
+            for quad in &quads {
+                let quad_bounds = Bounds {
+                    origin: bounds.origin + point(px(quad.x), px(quad.y)),
+                    size: gpui::size(px(quad.width), px(quad.height)),
+                };
+                window.paint_quad(gpui::quad(
+                    quad_bounds,
+                    gpui::Corners::all(px(quad.corner_radius)),
+                    gpui::Hsla::from(gpui::rgba(quad.background_color)),
+                    gpui::Edges::all(px(quad.border_width)),
+                    gpui::Hsla::from(gpui::rgba(quad.border_color)),
+                    gpui::BorderStyle::Solid,
+                ));
+            }
+            for (offset, font_size, shaped_line) in shaped_runs {
+                let _ = shaped_line.paint(
+                    bounds.origin + offset,
+                    font_size,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        },
+    )
+    .w(width)
+    .h(height);
+
+    let mut container = div().w(width).h(height).child(inner);
+    if let Some(replacement) = canvas_element.click_replacement.clone() {
+        container = container.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            move |_, window, cx| {
+                if let Some(editor) = editor.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        let snapshot = editor.buffer().read(cx).snapshot(cx);
+                        let start =
+                            snapshot.anchor_before(MultiBufferOffset(replacement.range.start));
+                        let end = snapshot.anchor_after(MultiBufferOffset(replacement.range.end));
+                        editor.buffer().update(cx, |buffer, cx| {
+                            buffer.edit([(start..end, replacement.replacement_text.clone())], None, cx);
+                        });
+                    });
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            },
+        );
+    }
+    container.into_any_element()
+}
 
 struct RowHighlight {
     index: usize,
@@ -2645,6 +2761,8 @@ impl Editor {
             sticky_headers_task: Task::ready(()),
             sticky_headers: None,
             colorize_brackets_task: Task::ready(()),
+            extension_crease_ids: Vec::new(),
+            extension_block_ids: HashSet::default(),
         };
 
         if let Some(project) = editor.project.clone() {
@@ -10098,6 +10216,99 @@ impl Editor {
                 },
                 cx,
             );
+        }
+    }
+
+    pub fn clear_extension_decorations(&mut self, cx: &mut Context<Self>) {
+        if !self.extension_crease_ids.is_empty() {
+            let crease_ids = std::mem::take(&mut self.extension_crease_ids);
+            let removed = self.remove_creases(crease_ids, cx);
+            let ranges: Vec<Range<Anchor>> = removed.into_iter().map(|(_, range)| range).collect();
+            self.remove_folds_with_type(&ranges, TypeId::of::<ExtensionInlineFold>(), false, cx);
+        }
+        if !self.extension_block_ids.is_empty() {
+            let block_ids = std::mem::take(&mut self.extension_block_ids);
+            self.remove_blocks(block_ids, None, cx);
+        }
+    }
+
+    pub fn apply_extension_decorations(
+        &mut self,
+        decorations: &extension::EditorDecorations,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_extension_decorations(cx);
+        let snapshot = self.buffer().read(cx).snapshot(cx);
+        let weak_editor = cx.weak_entity();
+
+        let mut creases = Vec::with_capacity(decorations.inline_folds.len());
+        for fold in &decorations.inline_folds {
+            let start = snapshot.anchor_before(MultiBufferOffset(fold.range.start));
+            let end = snapshot.anchor_after(MultiBufferOffset(fold.range.end));
+            let placeholder = if let Some(canvas) = fold.render_canvas.clone() {
+                let weak_editor = weak_editor.clone();
+                FoldPlaceholder {
+                    render: Arc::new(move |_fold_id, _range, _cx| {
+                        render_extension_canvas_element(&canvas, weak_editor.clone())
+                    }),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: (!fold.placeholder_text.is_empty())
+                        .then(|| SharedString::from(fold.placeholder_text.clone())),
+                }
+            } else {
+                let text: SharedString = fold.placeholder_text.clone().into();
+                let render_text = text.clone();
+                FoldPlaceholder {
+                    render: Arc::new(move |fold_id, _range, cx| {
+                        FoldPlaceholder::fold_element(fold_id, cx)
+                            .child(render_text.clone())
+                            .into_any_element()
+                    }),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: Some(text),
+                }
+            };
+            creases.push(Crease::simple(start..end, placeholder));
+        }
+
+        if !creases.is_empty() {
+            self.extension_crease_ids = self.insert_creases(creases.clone(), cx);
+            self.fold_creases(creases, false, window, cx);
+        }
+
+        let mut blocks = Vec::with_capacity(decorations.blocks.len());
+        for block in &decorations.blocks {
+            let offset = MultiBufferOffset(block.anchor_offset as usize);
+            let anchor = if block.above {
+                snapshot.anchor_before(offset)
+            } else {
+                snapshot.anchor_after(offset)
+            };
+            let placement = if block.above {
+                BlockPlacement::Above(anchor)
+            } else {
+                BlockPlacement::Below(anchor)
+            };
+            let canvas = block.content.clone();
+            let weak_editor = weak_editor.clone();
+            blocks.push(BlockProperties {
+                placement,
+                height: Some(block.height_rows as u32),
+                style: BlockStyle::Fixed,
+                render: Arc::new(move |_cx| {
+                    render_extension_canvas_element(&canvas, weak_editor.clone())
+                }),
+                priority: 0,
+            });
+        }
+
+        if !blocks.is_empty() {
+            self.extension_block_ids = self.insert_blocks(blocks, None, cx).into_iter().collect();
         }
     }
 

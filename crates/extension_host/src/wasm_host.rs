@@ -555,6 +555,24 @@ impl extension::Extension for WasmExtension {
         })
         .await?
     }
+
+    async fn editor_decorations_for_buffer(
+        &self,
+        language_name: LanguageName,
+        text: String,
+        cursor_offset: u32,
+    ) -> Result<extension::EditorDecorations> {
+        self.call(move |extension, store| {
+            async move {
+                extension
+                    .call_editor_decorations_for_buffer(store, &language_name, &text, cursor_offset)
+                    .await?
+                    .map_err(|err| store.data().extension_error(err))
+            }
+            .boxed()
+        })
+        .await?
+    }
 }
 
 pub struct WasmState {

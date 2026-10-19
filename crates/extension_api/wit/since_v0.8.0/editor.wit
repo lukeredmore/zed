@@ -40,4 +40,64 @@ interface editor {
         /// Full-width row background highlights to apply to the buffer.
         row-highlights: list<row-highlight>,
     }
+
+    /// A 2D rectangle primitive for extension-rendered editor decorations.
+    record canvas-quad {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background-color: u32,
+        border-color: u32,
+        border-width: f32,
+        corner-radius: f32,
+    }
+
+    /// A 2D styled text run primitive for extension-rendered editor decorations.
+    record canvas-glyph-run {
+        x: f32,
+        y: f32,
+        text: string,
+        color: u32,
+        font-size: f32,
+        font-weight: option<u16>,
+        italic: bool,
+        monospace: bool,
+    }
+
+    /// An optional buffer edit triggered when a canvas decoration is clicked.
+    record canvas-text-replacement {
+        range: range,
+        replacement-text: string,
+    }
+
+    /// A declarative 2D canvas element composed of quads and glyph runs.
+    record canvas-element {
+        width: f32,
+        height: f32,
+        quads: list<canvas-quad>,
+        glyph-runs: list<canvas-glyph-run>,
+        click-replacement: option<canvas-text-replacement>,
+    }
+
+    /// An inline fold decoration that collapses a UTF-8 byte range into a placeholder or canvas widget.
+    record inline-fold-decoration {
+        range: range,
+        placeholder-text: string,
+        render-canvas: option<canvas-element>,
+    }
+
+    /// A custom block decoration anchored above or below a UTF-8 byte offset.
+    record block-decoration {
+        anchor-offset: u32,
+        above: bool,
+        height-rows: u8,
+        content: canvas-element,
+    }
+
+    /// Inline fold and block decorations computed for an editor buffer.
+    record editor-decorations {
+        inline-folds: list<inline-fold-decoration>,
+        blocks: list<block-decoration>,
+    }
 }

@@ -580,6 +580,87 @@ impl From<editor::EditorHighlights> for extension::EditorHighlights {
     }
 }
 
+impl From<editor::CanvasQuad> for extension::CanvasQuad {
+    fn from(value: editor::CanvasQuad) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+            background_color: value.background_color,
+            border_color: value.border_color,
+            border_width: value.border_width,
+            corner_radius: value.corner_radius,
+        }
+    }
+}
+
+impl From<editor::CanvasGlyphRun> for extension::CanvasGlyphRun {
+    fn from(value: editor::CanvasGlyphRun) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            text: value.text,
+            color: value.color,
+            font_size: value.font_size,
+            font_weight: value.font_weight,
+            italic: value.italic,
+            monospace: value.monospace,
+        }
+    }
+}
+
+impl From<editor::CanvasTextReplacement> for extension::CanvasTextReplacement {
+    fn from(value: editor::CanvasTextReplacement) -> Self {
+        Self {
+            range: value.range.into(),
+            replacement_text: value.replacement_text,
+        }
+    }
+}
+
+impl From<editor::CanvasElement> for extension::CanvasElement {
+    fn from(value: editor::CanvasElement) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            quads: value.quads.into_iter().map(Into::into).collect(),
+            glyph_runs: value.glyph_runs.into_iter().map(Into::into).collect(),
+            click_replacement: value.click_replacement.map(Into::into),
+        }
+    }
+}
+
+impl From<editor::InlineFoldDecoration> for extension::InlineFoldDecoration {
+    fn from(value: editor::InlineFoldDecoration) -> Self {
+        Self {
+            range: value.range.into(),
+            placeholder_text: value.placeholder_text,
+            render_canvas: value.render_canvas.map(Into::into),
+        }
+    }
+}
+
+impl From<editor::BlockDecoration> for extension::BlockDecoration {
+    fn from(value: editor::BlockDecoration) -> Self {
+        Self {
+            anchor_offset: value.anchor_offset,
+            above: value.above,
+            height_rows: value.height_rows,
+            content: value.content.into(),
+        }
+    }
+}
+
+impl From<editor::EditorDecorations> for extension::EditorDecorations {
+    fn from(value: editor::EditorDecorations) -> Self {
+        Self {
+            inline_folds: value.inline_folds.into_iter().map(Into::into).collect(),
+            blocks: value.blocks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl HostKeyValueStore for WasmState {
     async fn insert(
         &mut self,

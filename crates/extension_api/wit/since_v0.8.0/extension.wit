@@ -12,7 +12,7 @@ world extension {
     use common.{env-vars, range};
     use context-server.{context-server-configuration};
     use dap.{attach-request, build-task-template, debug-config, debug-adapter-binary, debug-task-definition, debug-request, debug-scenario, launch-request, resolved-task, start-debugging-request-arguments-request};
-    use editor.{editor-highlights, row-highlight, text-highlight};
+    use editor.{block-decoration, canvas-element, canvas-glyph-run, canvas-quad, canvas-text-replacement, editor-decorations, editor-highlights, inline-fold-decoration, row-highlight, text-highlight};
     use lsp.{completion, symbol};
     use process.{command};
     use slash-command.{slash-command, slash-command-argument-completion, slash-command-output};
@@ -180,4 +180,7 @@ world extension {
 
     /// Computes dynamic text and row highlights for an editor buffer.
     export editor-highlights-for-buffer: func(language-name: string, text: string, cursor-offset: u32) -> result<editor-highlights, string>;
+
+    /// Computes inline fold and block decorations for an editor buffer.
+    export editor-decorations-for-buffer: func(language-name: string, text: string, cursor-offset: u32) -> result<editor-decorations, string>;
 }
