@@ -1247,6 +1247,7 @@ pub struct Editor {
     pub(crate) colorize_brackets_task: Task<()>,
     extension_crease_ids: Vec<CreaseId>,
     extension_block_ids: HashSet<CustomBlockId>,
+    refresh_extension_buffer_state_task: Task<()>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -2763,6 +2764,7 @@ impl Editor {
             colorize_brackets_task: Task::ready(()),
             extension_crease_ids: Vec::new(),
             extension_block_ids: HashSet::default(),
+            refresh_extension_buffer_state_task: Task::ready(()),
         };
 
         if let Some(project) = editor.project.clone() {
@@ -2906,6 +2908,7 @@ impl Editor {
             if let Some(buffer) = multi_buffer.read(cx).as_singleton() {
                 editor.register_buffer(buffer.read(cx).remote_id(), cx);
             }
+            editor.refresh_extension_buffer_state(cx);
             editor.report_editor_event(ReportEditorEvent::EditorOpened, None, cx);
         }
 
@@ -10235,7 +10238,6 @@ impl Editor {
     pub fn apply_extension_decorations(
         &mut self,
         decorations: &extension::EditorDecorations,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.clear_extension_decorations(cx);
@@ -10278,7 +10280,11 @@ impl Editor {
 
         if !creases.is_empty() {
             self.extension_crease_ids = self.insert_creases(creases.clone(), cx);
-            self.fold_creases(creases, false, window, cx);
+            self.display_map.update(cx, |map, cx| map.fold(creases, cx));
+            self.scrollbar_marker_state.dirty = true;
+            self.folds_did_change(cx);
+            self.inlay_hint_visibility_changed(cx);
+            cx.notify();
         }
 
         let mut blocks = Vec::with_capacity(decorations.blocks.len());
@@ -10310,6 +10316,83 @@ impl Editor {
         if !blocks.is_empty() {
             self.extension_block_ids = self.insert_blocks(blocks, None, cx).into_iter().collect();
         }
+    }
+
+    pub fn refresh_extension_buffer_state(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is_full() {
+            return;
+        }
+        let Some(proxy) = extension::ExtensionHostProxy::try_global(cx) else {
+            return;
+        };
+        let extensions = proxy.editor_extensions();
+        if extensions.is_empty() {
+            return;
+        }
+        let multi_buffer_snapshot = self.buffer().read(cx).snapshot(cx);
+        let Some(buffer_snapshot) = multi_buffer_snapshot.as_singleton() else {
+            return;
+        };
+        let Some(language) = buffer_snapshot.language().map(|l| l.name()) else {
+            return;
+        };
+        let buffer_text = buffer_snapshot.text();
+        let cursor_offset = self
+            .selections
+            .newest_anchor()
+            .head()
+            .to_offset(&multi_buffer_snapshot)
+            .0 as u32;
+
+        self.refresh_extension_buffer_state_task = cx.spawn(async move |this, cx| {
+            let mut merged_highlights = extension::EditorHighlights::default();
+            let mut merged_decorations = extension::EditorDecorations::default();
+            let mut has_highlights = false;
+            let mut has_decorations = false;
+
+            for ext in extensions {
+                if let Ok(highlights) = ext
+                    .editor_highlights_for_buffer(
+                        language.clone(),
+                        buffer_text.clone(),
+                        cursor_offset,
+                    )
+                    .await
+                {
+                    merged_highlights
+                        .text_highlights
+                        .extend(highlights.text_highlights);
+                    merged_highlights
+                        .row_highlights
+                        .extend(highlights.row_highlights);
+                    has_highlights = true;
+                }
+                if let Ok(decorations) = ext
+                    .editor_decorations_for_buffer(
+                        language.clone(),
+                        buffer_text.clone(),
+                        cursor_offset,
+                    )
+                    .await
+                {
+                    merged_decorations
+                        .inline_folds
+                        .extend(decorations.inline_folds);
+                    merged_decorations.blocks.extend(decorations.blocks);
+                    has_decorations = true;
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                if has_highlights {
+                    this.apply_extension_highlights(&merged_highlights, cx);
+                }
+                if has_decorations {
+                    this.apply_extension_decorations(&merged_decorations, cx);
+                }
+            })
+            .ok();
+        });
     }
 
     pub fn show_local_cursors(&self, window: &mut Window, cx: &mut App) -> bool {
@@ -10443,6 +10526,7 @@ impl Editor {
                 let snapshot = self.snapshot(window, cx);
                 self.refresh_matching_bracket_highlights(&snapshot, cx);
                 self.refresh_outline_symbols_at_cursor(cx);
+                self.refresh_extension_buffer_state(cx);
                 self.refresh_sticky_headers(&snapshot, cx);
                 if source.is_local() && self.has_active_edit_prediction() {
                     self.update_visible_edit_prediction(window, cx);
@@ -10584,6 +10668,7 @@ impl Editor {
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
                 cx.emit(EditorEvent::Reparsed(*buffer_id));
                 self.update_edit_prediction_settings(cx);
+                self.refresh_extension_buffer_state(cx);
                 cx.notify();
             }
             multi_buffer::Event::SettingsChanged => {
@@ -10848,6 +10933,7 @@ impl Editor {
         self.invalidate_semantic_tokens(None);
         self.refresh_semantic_tokens(None, false, cx);
         self.refresh_outline_symbols_at_cursor(cx);
+        self.refresh_extension_buffer_state(cx);
     }
 
     pub fn set_searchable(&mut self, searchable: bool) {

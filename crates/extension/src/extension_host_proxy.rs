@@ -32,12 +32,19 @@ pub struct ExtensionHostProxy {
     context_server_proxy: RwLock<Option<Arc<dyn ExtensionContextServerProxy>>>,
     debug_adapter_provider_proxy: RwLock<Option<Arc<dyn ExtensionDebugAdapterProviderProxy>>>,
     language_model_provider_proxy: RwLock<Option<Arc<dyn ExtensionLanguageModelProviderProxy>>>,
+    editor_extensions: RwLock<Vec<Arc<dyn Extension>>>,
 }
 
 impl ExtensionHostProxy {
     /// Returns the global [`ExtensionHostProxy`].
     pub fn global(cx: &App) -> Arc<Self> {
         GlobalExtensionHostProxy::global(cx).0.clone()
+    }
+
+    /// Returns the global [`ExtensionHostProxy`] if one is registered.
+    pub fn try_global(cx: &App) -> Option<Arc<Self>> {
+        cx.try_global::<GlobalExtensionHostProxy>()
+            .map(|global| global.0.clone())
     }
 
     /// Returns the global [`ExtensionHostProxy`].
@@ -57,7 +64,20 @@ impl ExtensionHostProxy {
             context_server_proxy: RwLock::default(),
             debug_adapter_provider_proxy: RwLock::default(),
             language_model_provider_proxy: RwLock::default(),
+            editor_extensions: RwLock::default(),
         }
+    }
+
+    pub fn register_editor_extension(&self, extension: Arc<dyn Extension>) {
+        self.editor_extensions.write().push(extension);
+    }
+
+    pub fn clear_editor_extensions(&self) {
+        self.editor_extensions.write().clear();
+    }
+
+    pub fn editor_extensions(&self) -> Vec<Arc<dyn Extension>> {
+        self.editor_extensions.read().clone()
     }
 
     pub fn register_theme_proxy(&self, proxy: impl ExtensionThemeProxy) {
