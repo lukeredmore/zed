@@ -10260,6 +10260,14 @@ impl Editor {
                     collapsed_text: (!fold.placeholder_text.is_empty())
                         .then(|| SharedString::from(fold.placeholder_text.clone())),
                 }
+            } else if fold.placeholder_text.is_empty() {
+                FoldPlaceholder {
+                    render: Arc::new(|_fold_id, _range, _cx| gpui::Empty.into_any_element()),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: None,
+                }
             } else {
                 let text: SharedString = fold.placeholder_text.clone().into();
                 let render_text = text.clone();
