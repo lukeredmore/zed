@@ -11214,6 +11214,53 @@ mod tests {
 
     #[test]
     fn test_toggle_inline_delimiter_and_heading_shortcuts() {
+        struct TestPreviewExtensionProvider;
+
+        impl folio_dylib::MarkdownPreviewExtensionProvider for TestPreviewExtensionProvider {
+            fn invoke_command(&self, command: &str, args: &[String]) -> Option<String> {
+                match command {
+                    "surrounding_code_span_delimiters" => {
+                        let source = args.first()?;
+                        let start = args.get(1)?.parse::<usize>().ok()?;
+                        let end = args.get(2)?.parse::<usize>().ok()?;
+                        let bytes = source.as_bytes();
+                        if start > 0
+                            && end < bytes.len()
+                            && bytes[start - 1] == b'`'
+                            && bytes[end] == b'`'
+                        {
+                            Some(format!("1\t{}\t{}\t{}\t{}", start - 1, start, end, end + 1))
+                        } else {
+                            Some("0".to_string())
+                        }
+                    }
+                    "evaluate_keystroke" => {
+                        let source = args.first()?;
+                        let start = args.get(1)?.parse::<usize>().ok()?;
+                        let end = args.get(2)?.parse::<usize>().ok()?;
+                        let key = args.get(5)?.as_str();
+                        let flags = args.get(6)?.parse::<u32>().ok()?;
+                        if key == "b" && (flags & 1) != 0 {
+                            let selected = &source[start..end];
+                            Some(format!(
+                                "6\t{}\t{}\t1\t{}\t{}\n**{}**",
+                                start,
+                                end,
+                                start + 2,
+                                end + 2,
+                                selected
+                            ))
+                        } else {
+                            Some("0".to_string())
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        folio_dylib::register_extension_provider(Arc::new(TestPreviewExtensionProvider));
+
         let src = "Use `cargo test` now";
         let (open, close) = surrounding_code_span_delimiters(src, &(5..15)).unwrap();
         assert_eq!(&src[open], "`");
@@ -11231,6 +11278,7 @@ mod tests {
             false,
             false,
         );
+        folio_dylib::clear_extension_provider();
         match decision {
             folio_dylib::KeystrokeDecision::SourceEdit {
                 edit_range,
