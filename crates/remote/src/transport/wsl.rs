@@ -74,7 +74,7 @@ impl WslRemoteConnection {
             connection_options.user
         );
         let (release_channel, version) =
-            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::global(cx)));
+            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::upstream(cx)));
 
         let mut this = Self {
             connection_options,
@@ -276,7 +276,7 @@ impl WslRemoteConnection {
 
         let wanted_version = match release_channel {
             ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
-            _ => Some(cx.update(|cx| AppVersion::global(cx))),
+            _ => Some(cx.update(|cx| AppVersion::upstream(cx))),
         };
 
         let src_path = delegate

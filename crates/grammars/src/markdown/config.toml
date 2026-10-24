@@ -1,6 +1,6 @@
 name = "Markdown"
 grammar = "markdown"
-path_suffixes = ["md", "mdx", "mdwn", "mdc", "markdown", "MD"]
+path_suffixes = ["md", "mdx", "mdwn", "mdown", "mkd", "mdc", "markdown", "MD"]
 modeline_aliases = ["md"]
 completion_query_characters = ["-"]
 block_comment = { start = "<!--", prefix = "", end = "-->", tab_size = 1 }
@@ -13,6 +13,7 @@ brackets = [
     { start = "\"", end = "\"", close = false, newline = false },
     { start = "'", end = "'", close = false, newline = false },
     { start = "`", end = "`", close = false, newline = false },
+    { start = "$", end = "$", close = true, newline = false, surround = true },
     { start = "*", end = "*", close = false, newline = false, surround = true },
     { start = "~", end = "~", close = false, newline = false, surround = true },
 ]
