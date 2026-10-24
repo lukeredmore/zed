@@ -533,6 +533,7 @@ impl LanguageRegistry {
             load: Arc::new(|| async { Err(anyhow!("already loaded")) }.boxed()),
             loaded: true,
             origin: LanguageOrigin::Native,
+            native_fallback: None,
         });
         state.add(language);
     }
