@@ -13,30 +13,57 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   RUST_LIB_BACKTRACE: 0
   MACOSX_DEPLOYMENT_TARGET: "10.15.7"
 
 jobs:
-  test-macos:
-    name: Run Tests (macOS)
+  # Tier 1: Lightweight pure-Rust sanity checks (~299 transitive crates; no GPUI, Wasmtime, Protobuf, or WASI SDK).
+  # Gives fast feedback in ~1-2 minutes even on a cold cache.
+  fast-sanity:
+    name: Fast Sanity (Extension API, Release Channel & Mermaid)
     runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
+          shared-key: "fast-sanity"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check zed_extension_api & run fast unit tests
+        run: |
+          cargo check -p zed_extension_api --all-targets
+          cargo nextest run \
+            -p release_channel \
+            -p mermaid_render \
+            --no-fail-fast \
+            --no-tests=warn
+
+  # Tier 2A: Extension Manifest/Builder, WASI Preview 2 Extension Host & GitHub Auto-Updater.
+  # Uses `-p` rather than `--workspace` so Cargo never compiles unrelated crates (`zed`, `collab`, `agent`, `editor`).
+  test-extension-and-updater:
+    name: Extension Host & Auto-Update Tests
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
           brew install cmake protobuf
 
-      - name: Ensure Rust toolchain from rust-toolchain.toml
-        run: |
-          rustup show active-toolchain
-
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ext-and-updater"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -47,11 +74,61 @@ jobs:
         run: |
           ./script/download-wasi-sdk
 
-      - name: Compute nextest package filterset
-        id: filter
+      - name: Run extension, extension_host & auto_update tests
+        run: |
+          cargo nextest run \
+            -p extension \
+            -p auto_update \
+            -p extension_host \
+            --no-fail-fast \
+            --no-tests=warn
+
+  # Tier 2B: WYSIWYG Markdown Canvas, LaTeX Math, Mermaid & Markdown Preview tests.
+  # Runs in parallel with Tier 2A without needing WASI SDK or Wasmtime/Cranelift.
+  test-markdown:
+    name: Markdown & Preview Tests
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake protobuf
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "markdown"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run markdown & markdown_preview tests
+        run: |
+          cargo nextest run \
+            -p markdown \
+            -p markdown_preview \
+            --no-fail-fast \
+            --no-tests=warn
+
+  # Tier 3: Any other workspace crates directly modified in the PR (outside the 7 always-tested crates above).
+  # Skips compilation completely (finishes in seconds) if no other crates were modified.
+  test-changed-crates:
+    name: Changed Crates Tests
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect additional changed workspace crates
+        id: detect
         env:
           BASE_REF: ${{ github.base_ref }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           import json
@@ -59,51 +136,31 @@ jobs:
           import pathlib
           import subprocess
 
-          event_name = os.environ.get("EVENT_NAME", "")
           base_ref = os.environ.get("BASE_REF", "") or "main"
-
-          # Always run E2E/sanity suites covering lukeredmore/zed custom functionality:
-          # - markdown & markdown_preview: WYSIWYG canvas, LaTeX math, Mermaid, WASI preview bridge
-          # - extension_host & extension: v0.8.0 Extension Editor API host & WASI Preview 2 integration
-          # - auto_update & release_channel: GitHub release auto-updater & macOS bundle versioning
-          sanity_packages = [
-              "markdown",
-              "markdown_preview",
-              "extension_host",
+          always_tested = {
+              "zed_extension_api",
+              "release_channel",
+              "mermaid_render",
               "extension",
               "auto_update",
-              "release_channel",
-          ]
+              "extension_host",
+              "markdown",
+              "markdown_preview",
+          }
 
-          run_all = event_name == "workflow_dispatch"
           changed_files = []
-
-          if not run_all:
-              try:
-                  merge_base = subprocess.check_output(
-                      ["git", "merge-base", f"origin/{base_ref}", "HEAD"],
-                      text=True,
-                  ).strip()
-                  diff_out = subprocess.check_output(
-                      ["git", "diff", "--name-only", merge_base, "HEAD"],
-                      text=True,
-                  )
-                  changed_files = [line.strip() for line in diff_out.splitlines() if line.strip()]
-              except Exception as exc:
-                  print(f"Could not diff against origin/{base_ref} ({exc}); falling back to full workspace.")
-                  run_all = True
-
-          root_trigger_prefixes = (
-              "Cargo.toml",
-              "Cargo.lock",
-              "rust-toolchain.toml",
-              ".cargo/",
-              ".config/nextest.toml",
-              ".github/workflows/",
-              "script/",
-          )
-          if any(f == p or f.startswith(p) for f in changed_files for p in root_trigger_prefixes):
-              run_all = True
+          try:
+              merge_base = subprocess.check_output(
+                  ["git", "merge-base", f"origin/{base_ref}", "HEAD"],
+                  text=True,
+              ).strip()
+              diff_out = subprocess.check_output(
+                  ["git", "diff", "--name-only", merge_base, "HEAD"],
+                  text=True,
+              )
+              changed_files = [line.strip() for line in diff_out.splitlines() if line.strip()]
+          except Exception as exc:
+              print(f"Could not diff against origin/{base_ref}: {exc}")
 
           metadata_raw = subprocess.check_output(
               ["cargo", "metadata", "--no-deps", "--format-version", "1"],
@@ -113,55 +170,55 @@ jobs:
           repo_root = pathlib.Path.cwd().resolve()
 
           dir_to_pkg = {}
-          workspace_pkg_names = set()
           for pkg in metadata.get("packages", []):
               manifest_dir = pathlib.Path(pkg["manifest_path"]).resolve().parent
               try:
                   rel_dir = manifest_dir.relative_to(repo_root).as_posix()
                   dir_to_pkg[rel_dir] = pkg["name"]
-                  workspace_pkg_names.add(pkg["name"])
               except ValueError:
                   pass
 
-          rdeps_packages = set()
+          extra_pkgs = set()
           for f in changed_files:
-              parts = f.split("/")
-              if len(parts) >= 2 and parts[0] in ("crates", "tooling"):
-                  candidate_dir = f"{parts[0]}/{parts[1]}"
-                  if candidate_dir in dir_to_pkg:
-                      rdeps_packages.add(dir_to_pkg[candidate_dir])
-                  else:
-                      # Handle nested crates such as crates/gpui_Toolkit/... if any
-                      for rel_dir, pkg_name in dir_to_pkg.items():
-                          if f.startswith(rel_dir + "/"):
-                              rdeps_packages.add(pkg_name)
+              for rel_dir, pkg_name in dir_to_pkg.items():
+                  if f.startswith(rel_dir + "/") and pkg_name not in always_tested:
+                      extra_pkgs.add(pkg_name)
 
-          expr_parts = []
-          for pkg in sorted(rdeps_packages):
-              expr_parts.append(f"rdeps({pkg})")
-          for pkg in sanity_packages:
-              if pkg in workspace_pkg_names:
-                  expr_parts.append(f"package({pkg})")
-
-          filterset = " | ".join(expr_parts)
-          print(f"Changed files ({len(changed_files)}): {changed_files}")
-          print(f"Changed packages for rdeps: {sorted(rdeps_packages)}")
-          print(f"run_all={run_all}")
-          print(f"filterset={filterset}")
+          sorted_pkgs = sorted(extra_pkgs)
+          pkg_flags = " ".join(f"-p {p}" for p in sorted_pkgs)
+          print(f"Changed files: {changed_files}")
+          print(f"Additional changed crates to test: {sorted_pkgs}")
 
           gh_out = os.environ.get("GITHUB_OUTPUT")
           if gh_out:
               with open(gh_out, "a", encoding="utf-8") as fh:
-                  fh.write(f"run_all={'true' if run_all else 'false'}\n")
-                  fh.write(f"filterset={filterset}\n")
+                  fh.write(f"has_extra={'true' if sorted_pkgs else 'false'}\n")
+                  fh.write(f"pkg_flags={pkg_flags}\n")
           PY
 
-      - name: Run tests with cargo-nextest
+      - name: Install build dependencies
+        if: steps.detect.outputs.has_extra == 'true'
         run: |
-          if [ "${{ steps.filter.outputs.run_all }}" = "true" ]; then
-            echo "Running full workspace test suite..."
-            cargo nextest run --workspace --no-fail-fast --no-tests=warn
-          else
-            echo "Running filtered test suite: ${{ steps.filter.outputs.filterset }}"
-            cargo nextest run --workspace --no-fail-fast --no-tests=warn -E "${{ steps.filter.outputs.filterset }}"
-          fi
+          brew install cmake protobuf
+
+      - name: Rust cache
+        if: steps.detect.outputs.has_extra == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "changed-crates"
+
+      - name: Install cargo-nextest
+        if: steps.detect.outputs.has_extra == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download WASI SDK
+        if: steps.detect.outputs.has_extra == 'true'
+        run: |
+          ./script/download-wasi-sdk
+
+      - name: Run tests for additional changed crates
+        if: steps.detect.outputs.has_extra == 'true'
+        run: |
+          cargo nextest run ${{ steps.detect.outputs.pkg_flags }} --no-fail-fast --no-tests=warn
