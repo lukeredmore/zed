@@ -9,13 +9,48 @@ use semver::Version;
 
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
+/// Reads a string value from the enclosing macOS `.app/Contents/Info.plist`, if the
+/// current executable is running from a macOS application bundle.
+pub fn bundled_info_plist_value(key: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let exe = env::current_exe().ok()?;
+        let macos_dir = exe.parent()?;
+        if macos_dir.file_name()?.to_str()? != "MacOS" {
+            return None;
+        }
+        let contents_dir = macos_dir.parent()?;
+        if contents_dir.file_name()?.to_str()? != "Contents" {
+            return None;
+        }
+        let plist_path = contents_dir.join("Info.plist");
+        let contents = std::fs::read_to_string(plist_path).ok()?;
+        let key_tag = format!("<key>{key}</key>");
+        let after_key = contents.split(&key_tag).nth(1)?;
+        let after_string_open = after_key.split("<string>").nth(1)?;
+        let value = after_string_open.split("</string>").next()?.trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = key;
+        None
+    }
+}
+
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
-    if cfg!(debug_assertions) {
-        env::var("ZED_RELEASE_CHANNEL").unwrap_or_else(|_| compile_time_release_channel_name())
-    } else {
-        compile_time_release_channel_name()
+    if let Ok(channel) = env::var("ZED_RELEASE_CHANNEL") {
+        return channel;
     }
+    if let Some(channel) = bundled_info_plist_value("ZedReleaseChannel") {
+        return channel;
+    }
+    compile_time_release_channel_name()
 });
 
 /// When a crate in zed is used as a dependency that uses the `crane` nix
@@ -91,6 +126,10 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
+struct GlobalUpstreamZedVersion(Version);
+
+impl Global for GlobalUpstreamZedVersion {}
+
 /// The version of Zed.
 pub struct AppVersion;
 
@@ -122,6 +161,20 @@ impl AppVersion {
         }
 
         version
+    }
+
+    /// Sets the vanilla Zed release version that this build is based on.
+    pub fn set_upstream(version: Version, cx: &mut App) {
+        cx.set_global(GlobalUpstreamZedVersion(version));
+    }
+
+    /// Returns the vanilla Zed release version, which selects the vanilla remote server.
+    pub fn upstream(cx: &App) -> Version {
+        if cx.has_global::<GlobalUpstreamZedVersion>() {
+            cx.global::<GlobalUpstreamZedVersion>().0.clone()
+        } else {
+            Self::global(cx)
+        }
     }
 
     /// Returns the global version number.

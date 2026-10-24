@@ -1,0 +1,83 @@
+name: Release macOS DMG
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    name: Build & Publish Zed.dmg
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake protobuf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Zed.app and package Zed.dmg
+        id: build
+        run: |
+          mkdir -p dist
+          ./script/package_zed_dmg.sh \
+            --build-number "${{ github.run_number }}" \
+            --output-dmg dist/Zed.dmg
+          UPSTREAM_VERSION="$(python3 -c 'import pathlib, re; m = re.search(r"^version\s*=\s*\"([^\"]+)\"", pathlib.Path("crates/zed/Cargo.toml").read_text(), re.M); print(m.group(1) if m else "0.241.0")')"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          FULL_VERSION="${UPSTREAM_VERSION}+stable.${{ github.run_number }}.${SHORT_SHA}"
+          SHA256="$(shasum -a 256 dist/Zed.dmg | awk '{print $1}')"
+          echo "version=${FULL_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+          echo "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish rolling latest GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="latest"
+          NOTES_FILE="$(mktemp)"
+          cat > "${NOTES_FILE}" <<EOF
+          <!-- zed-release: {"version":"${{ steps.build.outputs.version }}","commit_sha":"${{ github.sha }}","build_number":"${{ github.run_number }}","dmg_sha256":"${{ steps.build.outputs.sha256 }}"} -->
+          Automated macOS release built from [\`${{ steps.build.outputs.short_sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}).
+
+          ### Download
+          - **[Zed.dmg](https://github.com/${{ github.repository }}/releases/latest/download/Zed.dmg)** — Modded \`Zed.app\` with the \`v0.8.0\` Extension Editor API, inverted black/white Zed icon, and built-in auto-update.
+
+          | Artifact | Version | Commit | SHA-256 |
+          | --- | --- | --- | --- |
+          | \`Zed.dmg\` | \`${{ steps.build.outputs.version }}\` | \`${{ steps.build.outputs.short_sha }}\` | \`${{ steps.build.outputs.sha256 }}\` |
+          EOF
+
+          git tag -f "${TAG}" "${{ github.sha }}"
+          git push -f origin "refs/tags/${TAG}"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/Zed.dmg --clobber
+            gh release edit "${TAG}" \
+              --title "Zed (Extension Editor API)" \
+              --notes-file "${NOTES_FILE}" \
+              --latest
+          else
+            gh release create "${TAG}" dist/Zed.dmg \
+              --title "Zed (Extension Editor API)" \
+              --notes-file "${NOTES_FILE}" \
+              --latest
+          fi
