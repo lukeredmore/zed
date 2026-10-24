@@ -6145,6 +6145,7 @@ dependencies = [
  "language_extension",
  "log",
  "lsp",
+ "markdown",
  "moka",
  "node_runtime",
  "parking_lot",

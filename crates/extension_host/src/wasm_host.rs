@@ -765,6 +765,12 @@ impl WasmHost {
             // calls may invoke wasi functions that require a tokio runtime.
             let task = Arc::new(gpui_tokio::Tokio::spawn(cx, extension_task));
 
+            if manifest.id.as_ref().starts_with("folio-markdown") {
+                markdown::folio_dylib::register_extension_provider(Arc::new(
+                    WasmMarkdownPreviewProvider { tx: tx.clone() },
+                ));
+            }
+
             Ok(WasmExtension {
                 manifest,
                 work_dir,
@@ -1066,6 +1072,46 @@ impl CacheStore for IncrementalCompilationCache {
     fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
         self.cache.insert(key.to_vec(), value);
         true
+    }
+}
+
+struct WasmMarkdownPreviewProvider {
+    tx: mpsc::UnboundedSender<ExtensionCall>,
+}
+
+impl markdown::folio_dylib::MarkdownPreviewExtensionProvider for WasmMarkdownPreviewProvider {
+    fn is_alive(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
+    fn invoke_command(&self, command: &str, args: &[String]) -> Option<String> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        let slash_command = extension::SlashCommand {
+            name: command.to_string(),
+            description: String::new(),
+            tooltip_text: String::new(),
+            requires_argument: false,
+        };
+        let args = args.to_vec();
+        let sent = self.tx.unbounded_send(Box::new(move |ext, store| {
+            Box::pin(async move {
+                let res = ext
+                    .call_run_slash_command(store, &slash_command.into(), &args, None)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .map(|output| output.text);
+                let _ = reply_tx.send(res);
+            })
+        }));
+        if sent.is_err() {
+            markdown::folio_dylib::clear_extension_provider();
+            return None;
+        }
+        reply_rx
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .ok()
+            .flatten()
     }
 }
 

@@ -19,7 +19,7 @@ use gpui::{
     Resource, RetainAllImageCache, ScrollHandle, SharedString, SharedUri, Subscription, Task,
     WeakEntity, Window, point, px,
 };
-use language::{Buffer, LanguageRegistry};
+use language::{Bias, Buffer, LanguageRegistry};
 use markdown::{
     CodeBlockRenderer, CopyButtonVisibility, Markdown, MarkdownElement, MarkdownFont,
     MarkdownOptions, MarkdownStyle,
@@ -416,6 +416,7 @@ impl MarkdownPreviewView {
                             cx.emit(SearchEvent::MatchesInvalidated);
                         }
                         this.markdown_parse_pending = is_parsing;
+                        cx.notify();
                     },
                 ),
                 markdown,
@@ -582,7 +583,7 @@ impl MarkdownPreviewView {
                                 (index, focused)
                             });
                         if let Some(selection_start) = selection_start {
-                            let reveal = editor_is_focused || this.focus_handle.is_focused(window);
+                            let reveal = editor_is_focused;
                             this.sync_preview_to_source_index(selection_start, reveal, cx);
                             cx.notify();
                         }
@@ -1159,13 +1160,16 @@ impl MarkdownPreviewView {
             });
 
         if let Some(active_editor) = active_editor {
+            let editor_for_click = active_editor.clone();
             let editor_for_checkbox = active_editor.clone();
+            let editor_for_edit = active_editor;
             let view_handle = cx.entity().downgrade();
+            let view_handle_for_edit = view_handle.clone();
             markdown_element = markdown_element
                 .on_source_click(move |source_index, click_count, window, cx| {
                     if click_count == 1 {
                         Self::change_selection_to_source_index(
-                            &active_editor,
+                            &editor_for_click,
                             source_index,
                             false,
                             window,
@@ -1181,11 +1185,200 @@ impl MarkdownPreviewView {
                         new_checked,
                         cx,
                     );
-                    Self::refresh_preview(view_handle.clone(), window, cx);
+                    Self::apply_immediate_editor_sync(&view_handle, None, window, cx);
                 });
+            if markdown::folio_dylib::is_extension_loaded() {
+                markdown_element = markdown_element.on_source_edit(
+                    move |source_range, replacement, window, cx| {
+                        let new_cursor = source_range.start + replacement.len();
+                        Self::apply_source_edit_to_editor(
+                            &editor_for_edit,
+                            source_range,
+                            replacement,
+                            new_cursor,
+                            window,
+                            cx,
+                        );
+                        Self::apply_immediate_editor_sync(
+                            &view_handle_for_edit,
+                            Some(new_cursor..new_cursor),
+                            window,
+                            cx,
+                        );
+                    },
+                );
+            }
         }
 
         markdown_element
+    }
+
+    fn apply_source_edit_to_editor(
+        editor: &Entity<Editor>,
+        source_range: std::ops::Range<usize>,
+        replacement: &str,
+        new_cursor: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        markdown::folio_debug_log(format_args!(
+            "apply_source_edit: range={:?} replacement={:?} new_cursor={}",
+            source_range, replacement, new_cursor
+        ));
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let buffer_len = snapshot.len().0;
+            let raw_start = source_range.start.min(buffer_len);
+            let raw_end = source_range.end.min(buffer_len).max(raw_start);
+            let start = snapshot.clip_offset(MultiBufferOffset(raw_start), Bias::Left);
+            let end = snapshot
+                .clip_offset(MultiBufferOffset(raw_end), Bias::Right)
+                .max(start);
+            drop(snapshot);
+            editor.edit([(start..end, replacement)], cx);
+            let updated_snapshot = editor.buffer().read(cx).snapshot(cx);
+            let updated_len = updated_snapshot.len().0;
+            let clamped_cursor = updated_snapshot.clip_offset(
+                MultiBufferOffset(new_cursor.min(updated_len)),
+                Bias::Left,
+            );
+            drop(updated_snapshot);
+            let selection = clamped_cursor..clamped_cursor;
+            editor.change_selections(
+                SelectionEffects::scroll(Autoscroll::fit()),
+                window,
+                cx,
+                |selections| selections.select_ranges(vec![selection]),
+            );
+        });
+    }
+
+    fn apply_immediate_editor_sync(
+        view_handle: &WeakEntity<Self>,
+        override_selection: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(view) = view_handle.upgrade() else {
+            return;
+        };
+        cx.update_entity(&view, |this, cx| {
+            let Some(active_editor) = this.active_editor.as_ref().map(|s| s.editor.clone()) else {
+                return;
+            };
+            let (contents, editor_cursor) = active_editor.update(cx, |editor, cx| {
+                let contents: SharedString = editor
+                    .buffer()
+                    .read(cx)
+                    .as_singleton()
+                    .map(|b| b.read(cx).as_rope().to_string().into())
+                    .unwrap_or_default();
+                let cursor = Self::selected_source_index(editor, cx).unwrap_or(0);
+                (contents, cursor)
+            });
+            let new_selection = override_selection.unwrap_or(editor_cursor..editor_cursor);
+            this.pending_update_task = None;
+            this.hovered_url = None;
+            this.markdown.update(cx, |markdown, cx| {
+                markdown.apply_source_edit(contents, new_selection.clone(), cx);
+            });
+            this.markdown_parse_pending = this.markdown.read(cx).is_parsing();
+            this.sync_preview_to_source_index(new_selection.end, true, cx);
+            cx.emit(SearchEvent::MatchesInvalidated);
+            cx.notify();
+        });
+    }
+
+    fn undo(
+        &mut self,
+        action: &editor::actions::Undo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor.as_ref().map(|s| s.editor.clone()) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            editor.undo(action, window, cx);
+        });
+        let view_handle = cx.entity().downgrade();
+        Self::apply_immediate_editor_sync(&view_handle, None, window, cx);
+    }
+
+    fn redo(
+        &mut self,
+        action: &editor::actions::Redo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor.as_ref().map(|s| s.editor.clone()) else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            editor.redo(action, window, cx);
+        });
+        let view_handle = cx.entity().downgrade();
+        Self::apply_immediate_editor_sync(&view_handle, None, window, cx);
+    }
+
+    fn cut(
+        &mut self,
+        _: &editor::actions::Cut,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor.as_ref().map(|s| s.editor.clone()) else {
+            return;
+        };
+        let (source, selection) = {
+            let md = self.markdown.read(cx);
+            (md.source().clone(), md.selection_range())
+        };
+        let len = source.len();
+        let start = selection.start.min(len);
+        let end = selection.end.min(len);
+        if start < end {
+            cx.write_to_clipboard(ClipboardItem::new_string(source[start..end].to_string()));
+            Self::apply_source_edit_to_editor(&editor, start..end, "", start, window, cx);
+            let view_handle = cx.entity().downgrade();
+            Self::apply_immediate_editor_sync(&view_handle, Some(start..start), window, cx);
+        }
+    }
+
+    fn paste(
+        &mut self,
+        _: &editor::actions::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor.as_ref().map(|s| s.editor.clone()) else {
+            return;
+        };
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let (source_len, selection) = {
+            let md = self.markdown.read(cx);
+            (md.source().len(), md.selection_range())
+        };
+        let start = selection.start.min(source_len);
+        let end = selection.end.min(source_len).max(start);
+        let new_cursor = start + text.len();
+        Self::apply_source_edit_to_editor(&editor, start..end, &text, new_cursor, window, cx);
+        let view_handle = cx.entity().downgrade();
+        Self::apply_immediate_editor_sync(&view_handle, Some(new_cursor..new_cursor), window, cx);
+    }
+
+    fn select_all(
+        &mut self,
+        _: &editor::actions::SelectAll,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let len = self.markdown.read(cx).source().len();
+        self.markdown.update(cx, |md, cx| {
+            md.set_selection_range(0..len, cx);
+        });
     }
 
     fn apply_checkbox_toggle_to_editor(
@@ -1219,6 +1412,7 @@ impl MarkdownPreviewView {
         });
     }
 
+    #[allow(dead_code)]
     fn refresh_preview(view_handle: WeakEntity<Self>, window: &mut Window, cx: &mut App) {
         if let Some(view) = view_handle.upgrade() {
             let preview_is_focused = view.read(cx).focus_handle.contains_focused(window, cx);
@@ -1532,9 +1726,13 @@ fn resolve_preview_image(
         ))));
     }
 
-    let decoded = urlencoding::decode(dest_url)
+    let raw_path = dest_url
+        .strip_prefix("file://localhost")
+        .or_else(|| dest_url.strip_prefix("file://"))
+        .unwrap_or(dest_url);
+    let decoded = urlencoding::decode(raw_path)
         .map(|decoded| decoded.into_owned())
-        .unwrap_or_else(|_| dest_url.to_string());
+        .unwrap_or_else(|_| raw_path.to_string());
     let workspace_relative_path = ['/', '\\']
         .iter()
         .find_map(|prefix| decoded.strip_prefix(*prefix));
@@ -1568,13 +1766,15 @@ fn resolve_preview_image(
         }
     }
 
-    let path = if let (Some(stripped), Some(root)) = (workspace_relative_path, workspace_directory)
-    {
+    let path = if client_path_style.has_root(Path::new(&decoded)) && Path::new(&decoded).exists() {
+        PathBuf::from(&decoded)
+    } else if let (Some(stripped), Some(root)) = (workspace_relative_path, workspace_directory) {
         client_path_style.join_path(root, stripped).ok()?
     } else if client_path_style.has_root(Path::new(&decoded)) {
         PathBuf::from(decoded)
     } else {
-        client_path_style.join_path(base_directory?, decoded).ok()?
+        let fallback_base = base_directory.or(workspace_directory)?;
+        client_path_style.join_path(fallback_base, decoded).ok()?
     };
 
     path.exists()
@@ -1717,6 +1917,12 @@ impl Item for MarkdownPreviewView {
         {
             self.set_editor(editor, window, cx);
         }
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.active_editor
+            .as_ref()
+            .is_some_and(|editor_state| editor_state.editor.read(cx).is_dirty(cx))
     }
 
     fn can_save(&self, cx: &App) -> bool {
@@ -1877,6 +2083,11 @@ impl Render for MarkdownPreviewView {
             .on_action(cx.listener(MarkdownPreviewView::increase_font_size))
             .on_action(cx.listener(MarkdownPreviewView::decrease_font_size))
             .on_action(cx.listener(MarkdownPreviewView::reset_font_size))
+            .on_action(cx.listener(MarkdownPreviewView::undo))
+            .on_action(cx.listener(MarkdownPreviewView::redo))
+            .on_action(cx.listener(MarkdownPreviewView::cut))
+            .on_action(cx.listener(MarkdownPreviewView::paste))
+            .on_action(cx.listener(MarkdownPreviewView::select_all))
             .w_full()
             .flex_1()
             .min_h_0()
