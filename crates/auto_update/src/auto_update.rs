@@ -1999,4 +1999,46 @@ mod tests {
             Some(fetched_version.parse().unwrap())
         );
     }
+
+    #[test]
+    fn test_parse_github_release_asset_and_stable_build_number_comparison() {
+        let payload = br#"{
+            "tag_name": "latest",
+            "body": "<!-- zed-release: {\"version\":\"0.241.0+stable.42.db41c83\",\"commit_sha\":\"db41c83895\",\"build_number\":\"42\",\"dmg_sha256\":\"abc\"} -->\nRelease notes",
+            "assets": [
+                {
+                    "name": "Zed.dmg",
+                    "browser_download_url": "https://github.com/lukeredmore/zed/releases/download/latest/Zed.dmg"
+                }
+            ]
+        }"#;
+        let asset = parse_github_release_asset(payload, "macos", "aarch64").unwrap();
+        assert_eq!(asset.version, "0.241.0+stable.42.db41c83");
+        assert_eq!(
+            asset.url,
+            "https://github.com/lukeredmore/zed/releases/download/latest/Zed.dmg"
+        );
+
+        let installed: semver::Version = "0.241.0+stable.41.1111111".parse().unwrap();
+        let newer = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("1111111".to_string())),
+            installed,
+            asset.version.clone(),
+            AutoUpdateStatus::Idle,
+        )
+        .unwrap();
+        assert_eq!(newer, Some(asset.version.parse().unwrap()));
+
+        let same_installed: semver::Version = "0.241.0+stable.42.db41c83".parse().unwrap();
+        let not_newer = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Stable,
+            Ok(Some("db41c83".to_string())),
+            same_installed,
+            asset.version,
+            AutoUpdateStatus::Idle,
+        )
+        .unwrap();
+        assert_eq!(not_newer, None);
+    }
 }
