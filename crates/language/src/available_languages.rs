@@ -19,6 +19,7 @@ pub struct AvailableLanguage {
     pub(super) loaded: bool,
     pub(super) manifest_name: Option<ManifestName>,
     pub(super) origin: LanguageOrigin,
+    pub(super) native_fallback: Option<Box<AvailableLanguage>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -73,9 +74,77 @@ impl AvailableLanguages {
             .find(|existing_language| existing_language.name == name)
         {
             if origin == LanguageOrigin::Extension
-                && existing_language.origin == LanguageOrigin::Native
+                && (existing_language.origin == LanguageOrigin::Native
+                    || existing_language.native_fallback.is_some())
             {
-                return None;
+                let native_fallback = existing_language
+                    .native_fallback
+                    .clone()
+                    .unwrap_or_else(|| Box::new(existing_language.clone()));
+                let native_load = native_fallback.load.clone();
+                let ext_load = load;
+                let merged_load: LanguageLoader = Arc::new(move || {
+                    let native_load = native_load.clone();
+                    let ext_load = ext_load.clone();
+                    futures::FutureExt::boxed(async move {
+                        let mut base = (native_load)().await?;
+                        if let Ok(ext) = (ext_load)().await {
+                            base.config = ext.config;
+                            if ext.queries.highlights.is_some() {
+                                base.queries.highlights = ext.queries.highlights;
+                            }
+                            if ext.queries.brackets.is_some() {
+                                base.queries.brackets = ext.queries.brackets;
+                            }
+                            if ext.queries.indents.is_some() {
+                                base.queries.indents = ext.queries.indents;
+                            }
+                            if ext.queries.outline.is_some() {
+                                base.queries.outline = ext.queries.outline;
+                            }
+                            if ext.queries.injections.is_some() {
+                                base.queries.injections = ext.queries.injections;
+                            }
+                            if ext.queries.overrides.is_some() {
+                                base.queries.overrides = ext.queries.overrides;
+                            }
+                            if ext.queries.redactions.is_some() {
+                                base.queries.redactions = ext.queries.redactions;
+                            }
+                            if ext.queries.runnables.is_some() {
+                                base.queries.runnables = ext.queries.runnables;
+                            }
+                            if ext.queries.text_objects.is_some() {
+                                base.queries.text_objects = ext.queries.text_objects;
+                            }
+                            if ext.queries.debugger.is_some() {
+                                base.queries.debugger = ext.queries.debugger;
+                            }
+                            if ext.context_provider.is_some() {
+                                base.context_provider = ext.context_provider;
+                            }
+                            if ext.toolchain_provider.is_some() {
+                                base.toolchain_provider = ext.toolchain_provider;
+                            }
+                            if ext.manifest_name.is_some() {
+                                base.manifest_name = ext.manifest_name;
+                            }
+                        }
+                        Ok(base)
+                    })
+                });
+                existing_language.id = LanguageId::new();
+                existing_language.grammar = grammar.or_else(|| native_fallback.grammar.clone());
+                existing_language.matcher = matcher;
+                existing_language.hidden = hidden;
+                existing_language.load = merged_load;
+                existing_language.manifest_name =
+                    manifest_name.or_else(|| native_fallback.manifest_name.clone());
+                existing_language.origin = LanguageOrigin::Extension;
+                existing_language.native_fallback = Some(native_fallback);
+                let was_loaded = existing_language.loaded;
+                existing_language.loaded = false;
+                return Some(was_loaded);
             }
             existing_language.id = LanguageId::new();
             existing_language.grammar = grammar;
@@ -98,6 +167,7 @@ impl AvailableLanguages {
                 loaded: false,
                 manifest_name,
                 origin,
+                native_fallback: None,
             });
             Some(false)
         }
@@ -184,11 +254,16 @@ impl AvailableLanguages {
         names: &[LanguageName],
     ) -> Vec<LanguageName> {
         let mut removed = Vec::new();
-        self.0.retain(|language| {
+        self.0.retain_mut(|language| {
             let should_remove =
                 language.origin == LanguageOrigin::Extension && names.contains(&language.name);
             if should_remove {
                 removed.push(language.name.clone());
+                if let Some(mut native) = language.native_fallback.take() {
+                    native.loaded = false;
+                    *language = *native;
+                    return true;
+                }
             }
             !should_remove
         });
