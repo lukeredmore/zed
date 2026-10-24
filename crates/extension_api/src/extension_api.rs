@@ -25,6 +25,10 @@ pub use wit::{
         LaunchRequest, StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
         TaskTemplate, TcpArguments, TcpArgumentsTemplate, resolve_tcp_template,
     },
+    zed::extension::editor::{
+        BlockDecoration, CanvasElement, CanvasGlyphRun, CanvasQuad, CanvasTextReplacement,
+        EditorDecorations, EditorHighlights, InlineFoldDecoration, RowHighlight, TextHighlight,
+    },
     zed::extension::github::{
         GithubRelease, GithubReleaseAsset, GithubReleaseOptions, github_release_by_tag_name,
         latest_github_release,
@@ -280,6 +284,32 @@ pub trait Extension: Send + Sync {
         _build_task: TaskTemplate,
     ) -> Result<DebugRequest, String> {
         Err("`run_dap_locator` not implemented".to_string())
+    }
+
+    /// Computes dynamic text and row highlights for an editor buffer.
+    fn editor_highlights_for_buffer(
+        &mut self,
+        _language_name: String,
+        _text: String,
+        _cursor_offset: u32,
+    ) -> Result<EditorHighlights, String> {
+        Ok(EditorHighlights {
+            text_highlights: Vec::new(),
+            row_highlights: Vec::new(),
+        })
+    }
+
+    /// Computes inline fold and block decorations for an editor buffer.
+    fn editor_decorations_for_buffer(
+        &mut self,
+        _language_name: String,
+        _text: String,
+        _cursor_offset: u32,
+    ) -> Result<EditorDecorations, String> {
+        Ok(EditorDecorations {
+            inline_folds: Vec::new(),
+            blocks: Vec::new(),
+        })
     }
 }
 
@@ -558,6 +588,22 @@ impl wit::Guest for Component {
         build_task: TaskTemplate,
     ) -> Result<DebugRequest, String> {
         extension().run_dap_locator(locator_name, build_task)
+    }
+
+    fn editor_highlights_for_buffer(
+        language_name: String,
+        text: String,
+        cursor_offset: u32,
+    ) -> Result<EditorHighlights, String> {
+        extension().editor_highlights_for_buffer(language_name, text, cursor_offset)
+    }
+
+    fn editor_decorations_for_buffer(
+        language_name: String,
+        text: String,
+        cursor_offset: u32,
+    ) -> Result<EditorDecorations, String> {
+        extension().editor_decorations_for_buffer(language_name, text, cursor_offset)
     }
 }
 

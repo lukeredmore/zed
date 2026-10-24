@@ -165,7 +165,7 @@ impl MarkdownElement {
 
             self.push_markdown_list_item(
                 builder,
-                div().child(bullet).into_any_element(),
+                Some(div().child(bullet).into_any_element()),
                 &list_item.source_range,
                 markdown_end,
             );
@@ -453,6 +453,10 @@ impl MarkdownElement {
             .image_resolver
             .as_ref()
             .and_then(|resolve| resolve(image.dest_url.as_ref(), cx))
+            .or_else(|| {
+                crate::decode_data_url_image(image.dest_url.as_ref())
+                    .map(gpui::ImageSource::from)
+            })
         else {
             return;
         };

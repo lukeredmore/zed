@@ -1,0 +1,103 @@
+interface editor {
+    use common.{range};
+
+    /// A styled highlight for a UTF-8 byte range in an editor buffer.
+    record text-highlight {
+        /// The UTF-8 byte range in the buffer to highlight.
+        range: range,
+        /// Optional foreground color in packed `0xRRGGBBAA` format.
+        color: option<u32>,
+        /// Optional background color in packed `0xRRGGBBAA` format.
+        background-color: option<u32>,
+        /// Optional font weight (`100`..=`900`).
+        font-weight: option<u16>,
+        /// Whether the text should be rendered in italics.
+        italic: bool,
+        /// Whether the text should be underlined.
+        underline: bool,
+        /// Whether the text should be struck through.
+        strikethrough: bool,
+        /// Whether the text should be faded out.
+        fade-out: bool,
+    }
+
+    /// A background highlight for an inclusive 0-based buffer row range.
+    record row-highlight {
+        /// The starting buffer row (0-based, inclusive).
+        start-row: u32,
+        /// The ending buffer row (0-based, inclusive).
+        end-row: u32,
+        /// Background color in packed `0xRRGGBBAA` format.
+        color: u32,
+        /// Whether the editor should autoscroll to this highlight.
+        should-autoscroll: bool,
+    }
+
+    /// Dynamic text and row highlights computed for an editor buffer.
+    record editor-highlights {
+        /// Span-level text highlights to apply to the buffer.
+        text-highlights: list<text-highlight>,
+        /// Full-width row background highlights to apply to the buffer.
+        row-highlights: list<row-highlight>,
+    }
+
+    /// A 2D rectangle primitive for extension-rendered editor decorations.
+    record canvas-quad {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background-color: u32,
+        border-color: u32,
+        border-width: f32,
+        corner-radius: f32,
+    }
+
+    /// A 2D styled text run primitive for extension-rendered editor decorations.
+    record canvas-glyph-run {
+        x: f32,
+        y: f32,
+        text: string,
+        color: u32,
+        font-size: f32,
+        font-weight: option<u16>,
+        italic: bool,
+        monospace: bool,
+    }
+
+    /// An optional buffer edit triggered when a canvas decoration is clicked.
+    record canvas-text-replacement {
+        range: range,
+        replacement-text: string,
+    }
+
+    /// A declarative 2D canvas element composed of quads and glyph runs.
+    record canvas-element {
+        width: f32,
+        height: f32,
+        quads: list<canvas-quad>,
+        glyph-runs: list<canvas-glyph-run>,
+        click-replacement: option<canvas-text-replacement>,
+    }
+
+    /// An inline fold decoration that collapses a UTF-8 byte range into a placeholder or canvas widget.
+    record inline-fold-decoration {
+        range: range,
+        placeholder-text: string,
+        render-canvas: option<canvas-element>,
+    }
+
+    /// A custom block decoration anchored above or below a UTF-8 byte offset.
+    record block-decoration {
+        anchor-offset: u32,
+        above: bool,
+        height-rows: u8,
+        content: canvas-element,
+    }
+
+    /// Inline fold and block decorations computed for an editor buffer.
+    record editor-decorations {
+        inline-folds: list<inline-fold-decoration>,
+        blocks: list<block-decoration>,
+    }
+}

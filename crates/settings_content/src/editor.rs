@@ -72,8 +72,6 @@ pub struct EditorSettingsContent {
     pub scrollbar: Option<ScrollbarContent>,
     /// Minimap related settings
     pub minimap: Option<MinimapContent>,
-    /// Gutter related settings
-    pub gutter: Option<GutterContent>,
     /// Whether the editor will scroll beyond the last line.
     ///
     /// Default: one_page

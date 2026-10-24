@@ -169,10 +169,11 @@ use gpui::{
     Action, Animation, AnimationExt, AnyElement, App, AppContext, AsyncWindowContext,
     AvailableSpace, Background, Bounds, ClickEvent, ClipboardEntry, ClipboardItem, Context,
     DispatchPhase, Edges, Entity, EntityId, EntityInputHandler, EventEmitter, FocusHandle,
-    FocusOutEvent, Focusable, FontId, FontStyle, FontWeight, Global, HighlightStyle, Hsla, IsZero,
-    KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad, ParentElement,
-    Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size, Stateful, Styled,
-    Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection, UnderlineStyle,
+    FocusOutEvent, Focusable, Font, FontId, FontStyle, FontWeight, Global, HighlightStyle, Hsla,
+    IsZero, KeyContext, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, PaintQuad,
+    ParentElement, Pixels, PressureStage, Render, ScrollHandle, SharedString, SharedUri, Size,
+    Stateful, Styled, Subscription, Task, TextRun, TextStyle, TextStyleRefinement, UTF16Selection,
+    UnderlineStyle,
     UniformListScrollHandle, WeakEntity, WeakFocusHandle, Window, div, point, prelude::*,
     pulsating_between, px, relative, size,
 };
@@ -546,6 +547,7 @@ pub struct EditorStyle {
     pub border: Hsla,
     pub local_player: PlayerColor,
     pub text: TextStyle,
+    pub monospace_font: Option<Font>,
     pub scrollbar_width: Pixels,
     pub syntax: Arc<SyntaxTheme>,
     pub status: StatusColors,
@@ -553,6 +555,29 @@ pub struct EditorStyle {
     pub edit_prediction_styles: EditPredictionStyles,
     pub unnecessary_code_fade: f32,
     pub show_underlines: bool,
+}
+
+impl EditorStyle {
+    pub fn text_run(&self, chunk: &HighlightedChunk<'_>, len: usize) -> TextRun {
+        let text_style = if let Some(style) = chunk.style {
+            Cow::Owned(self.text.clone().highlight(style))
+        } else {
+            Cow::Borrowed(&self.text)
+        };
+        let mut run = text_style.to_run(len);
+        if chunk.is_monospace
+            && let Some(monospace_font) = &self.monospace_font
+        {
+            run.font = Font {
+                family: monospace_font.family.clone(),
+                features: monospace_font.features.clone(),
+                fallbacks: monospace_font.fallbacks.clone(),
+                weight: text_style.font_weight,
+                style: text_style.font_style,
+            };
+        }
+        run
+    }
 }
 
 impl Default for EditorStyle {
@@ -564,6 +589,7 @@ impl Default for EditorStyle {
             border: Hsla::default(),
             local_player: PlayerColor::default(),
             text: TextStyle::default(),
+            monospace_font: None,
             scrollbar_width: Pixels::default(),
             syntax: NONE_SYNTAX.clone(),
             // HACK: Status colors don't have a real default.
@@ -1219,6 +1245,9 @@ pub struct Editor {
     sticky_headers_task: Task<()>,
     sticky_headers: Option<Vec<OutlineItem<Anchor>>>,
     pub(crate) colorize_brackets_task: Task<()>,
+    extension_crease_ids: Vec<CreaseId>,
+    extension_block_ids: HashSet<CustomBlockId>,
+    refresh_extension_buffer_state_task: Task<()>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -1266,6 +1295,7 @@ pub struct EditorSnapshot {
     show_runnables: Option<bool>,
     show_breakpoints: Option<bool>,
     show_bookmarks: Option<bool>,
+    pub gutter_settings: language_settings::GutterSettings,
     git_blame_gutter_max_author_length: Option<usize>,
     pub display_snapshot: DisplaySnapshot,
     pub placeholder_display_snapshot: Option<DisplaySnapshot>,
@@ -1553,10 +1583,141 @@ impl Default for RowHighlightOptions {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RowHighlightColor {
+    Fn(fn(&App) -> Hsla),
+    Constant(Hsla),
+}
+
+impl RowHighlightColor {
+    fn resolve(self, cx: &App) -> Hsla {
+        match self {
+            Self::Fn(f) => f(cx),
+            Self::Constant(color) => color,
+        }
+    }
+}
+
+pub struct ExtensionRowHighlights;
+pub struct ExtensionInlineFold;
+
+fn render_extension_canvas_element(
+    canvas_element: &extension::CanvasElement,
+    editor: WeakEntity<Editor>,
+) -> AnyElement {
+    let width = px(canvas_element.width);
+    let height = px(canvas_element.height);
+    let quads = canvas_element.quads.clone();
+    let glyph_runs = canvas_element.glyph_runs.clone();
+
+    let inner = gpui::canvas(
+        move |_bounds, window, cx| {
+            let buffer_font = &ThemeSettings::get_global(cx).buffer_font;
+            let mut shaped_runs = Vec::with_capacity(glyph_runs.len());
+            for run in &glyph_runs {
+                let text: SharedString = run.text.clone().into();
+                let font_size = px(run.font_size);
+                let font_family = if run.monospace {
+                    let text_system = cx.text_system();
+                    let font_id = text_system.resolve_font(buffer_font);
+                    let i_advance = text_system.advance(font_id, px(14.0), 'i').ok();
+                    let m_advance = text_system.advance(font_id, px(14.0), 'm').ok();
+                    if matches!((i_advance, m_advance), (Some(i), Some(m)) if (i.width - m.width).abs() < px(0.01))
+                    {
+                        buffer_font.family.clone()
+                    } else {
+                        ".ZedMono".into()
+                    }
+                } else {
+                    buffer_font.family.clone()
+                };
+                let font = gpui::Font {
+                    family: font_family,
+                    features: gpui::FontFeatures::default(),
+                    fallbacks: None,
+                    weight: run
+                        .font_weight
+                        .map(|w| gpui::FontWeight(w as f32))
+                        .unwrap_or(gpui::FontWeight::NORMAL),
+                    style: if run.italic {
+                        gpui::FontStyle::Italic
+                    } else {
+                        gpui::FontStyle::Normal
+                    },
+                };
+                let text_run = gpui::TextRun {
+                    len: text.len(),
+                    font,
+                    color: gpui::Hsla::from(gpui::rgba(run.color)),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = window
+                    .text_system()
+                    .shape_line(text, font_size, &[text_run], None);
+                shaped_runs.push((point(px(run.x), px(run.y)), font_size, shaped));
+            }
+            shaped_runs
+        },
+        move |bounds, shaped_runs, window, cx| {
+            for quad in &quads {
+                let quad_bounds = Bounds {
+                    origin: bounds.origin + point(px(quad.x), px(quad.y)),
+                    size: gpui::size(px(quad.width), px(quad.height)),
+                };
+                window.paint_quad(gpui::quad(
+                    quad_bounds,
+                    gpui::Corners::all(px(quad.corner_radius)),
+                    gpui::Hsla::from(gpui::rgba(quad.background_color)),
+                    gpui::Edges::all(px(quad.border_width)),
+                    gpui::Hsla::from(gpui::rgba(quad.border_color)),
+                    gpui::BorderStyle::Solid,
+                ));
+            }
+            for (offset, font_size, shaped_line) in shaped_runs {
+                let _ = shaped_line.paint(
+                    bounds.origin + offset,
+                    font_size,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        },
+    )
+    .w(width)
+    .h(height);
+
+    let mut container = div().w(width).h(height).child(inner);
+    if let Some(replacement) = canvas_element.click_replacement.clone() {
+        container = container.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            move |_, window, cx| {
+                if let Some(editor) = editor.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        let snapshot = editor.buffer().read(cx).snapshot(cx);
+                        let start =
+                            snapshot.anchor_before(MultiBufferOffset(replacement.range.start));
+                        let end = snapshot.anchor_after(MultiBufferOffset(replacement.range.end));
+                        editor.buffer().update(cx, |buffer, cx| {
+                            buffer.edit([(start..end, replacement.replacement_text.clone())], None, cx);
+                        });
+                    });
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            },
+        );
+    }
+    container.into_any_element()
+}
+
 struct RowHighlight {
     index: usize,
     range: Range<Anchor>,
-    color: fn(&App) -> Hsla,
+    color: RowHighlightColor,
     options: RowHighlightOptions,
     type_id: TypeId,
 }
@@ -2601,6 +2762,9 @@ impl Editor {
             sticky_headers_task: Task::ready(()),
             sticky_headers: None,
             colorize_brackets_task: Task::ready(()),
+            extension_crease_ids: Vec::new(),
+            extension_block_ids: HashSet::default(),
+            refresh_extension_buffer_state_task: Task::ready(()),
         };
 
         if let Some(project) = editor.project.clone() {
@@ -2744,6 +2908,7 @@ impl Editor {
             if let Some(buffer) = multi_buffer.read(cx).as_singleton() {
                 editor.register_buffer(buffer.read(cx).remote_id(), cx);
             }
+            editor.refresh_extension_buffer_state(cx);
             editor.report_editor_event(ReportEditorEvent::EditorOpened, None, cx);
         }
 
@@ -3159,6 +3324,7 @@ impl Editor {
             show_runnables: self.show_runnables,
             show_bookmarks: self.show_bookmarks,
             show_breakpoints: self.show_breakpoints,
+            gutter_settings: self.buffer.read(cx).language_settings(cx).gutter,
             git_blame_gutter_max_author_length,
             scroll_anchor: self.scroll_manager.shared_scroll_anchor(cx),
             display_snapshot,
@@ -4796,7 +4962,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> IconButton {
-        let gutter_settings = EditorSettings::get_global(cx).gutter;
+        let gutter_settings = self.buffer.read(cx).language_settings(cx).gutter;
         let show_bookmarks = self.show_bookmarks.unwrap_or(gutter_settings.bookmarks);
         let show_breakpoints = self.show_breakpoints.unwrap_or(gutter_settings.breakpoints);
 
@@ -9288,6 +9454,27 @@ impl Editor {
         options: RowHighlightOptions,
         cx: &mut Context<Self>,
     ) {
+        self.insert_row_highlight::<T>(range, RowHighlightColor::Fn(color), options, cx);
+    }
+
+    /// Adds a row highlight for the given range using a constant color.
+    pub fn highlight_rows_with_color<T: 'static>(
+        &mut self,
+        range: Range<Anchor>,
+        color: Hsla,
+        options: RowHighlightOptions,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_row_highlight::<T>(range, RowHighlightColor::Constant(color), options, cx);
+    }
+
+    fn insert_row_highlight<T: 'static>(
+        &mut self,
+        range: Range<Anchor>,
+        color: RowHighlightColor,
+        options: RowHighlightOptions,
+        cx: &mut Context<Self>,
+    ) {
         let snapshot = self.buffer().read(cx).snapshot(cx);
         let row_highlights = self.highlighted_rows.entry(TypeId::of::<T>()).or_default();
         let ix = row_highlights.binary_search_by(|highlight| {
@@ -9404,7 +9591,7 @@ impl Editor {
             .get(&TypeId::of::<T>())
             .map_or(&[] as &[_], |highlights| highlights.as_slice())
             .iter()
-            .map(|highlight| (highlight.range.clone(), (highlight.color)(cx)))
+            .map(|highlight| (highlight.range.clone(), highlight.color.resolve(cx)))
     }
 
     /// Merges all anchor ranges for all context types ever set, picking the last highlight added in case of a row conflict.
@@ -9517,7 +9704,7 @@ impl Editor {
                                 LineHighlight {
                                     include_gutter: highlight.options.include_gutter,
                                     border: None,
-                                    background: (highlight.color)(cx).into(),
+                                    background: highlight.color.resolve(cx).into(),
                                     type_id: Some(highlight.type_id),
                                 },
                             );
@@ -9969,6 +10156,253 @@ impl Editor {
         }
     }
 
+    pub fn clear_extension_highlights(&mut self, cx: &mut Context<Self>) {
+        self.clear_row_highlights::<ExtensionRowHighlights>();
+        self.clear_highlights_with(&mut |key| matches!(key, HighlightKey::Extension(_)), cx);
+    }
+
+    pub fn apply_extension_highlights(
+        &mut self,
+        highlights: &extension::EditorHighlights,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_extension_highlights(cx);
+        let snapshot = self.buffer().read(cx).snapshot(cx);
+
+        for (index, text_highlight) in highlights.text_highlights.iter().enumerate() {
+            let start = snapshot.anchor_before(MultiBufferOffset(text_highlight.range.start));
+            let end = snapshot.anchor_after(MultiBufferOffset(text_highlight.range.end));
+            let color = text_highlight.color.map(|rgba| gpui::rgba(rgba).into());
+            let background_color = text_highlight
+                .background_color
+                .map(|rgba| gpui::rgba(rgba).into());
+            let style = HighlightStyle {
+                color,
+                background_color,
+                font_weight: text_highlight
+                    .font_weight
+                    .map(|weight| FontWeight(weight.clamp(100, 900) as f32)),
+                font_style: text_highlight.italic.then_some(FontStyle::Italic),
+                underline: text_highlight.underline.then(|| UnderlineStyle {
+                    thickness: px(1.0),
+                    color,
+                    wavy: false,
+                }),
+                strikethrough: text_highlight
+                    .strikethrough
+                    .then(|| gpui::StrikethroughStyle {
+                        thickness: px(1.0),
+                        color,
+                    }),
+                fade_out: text_highlight.fade_out.then_some(-0.45),
+                ..Default::default()
+            };
+            self.highlight_text(HighlightKey::Extension(index), vec![start..end], style, cx);
+        }
+
+        let max_point = snapshot.max_point();
+        for row_highlight in &highlights.row_highlights {
+            let start_row = row_highlight.start_row.min(max_point.row);
+            let end_row = row_highlight.end_row.min(max_point.row);
+            let start = snapshot.anchor_before(Point::new(start_row, 0));
+            let end = snapshot.anchor_after(Point::new(
+                end_row,
+                snapshot.line_len(MultiBufferRow(end_row)),
+            ));
+            let color: Hsla = gpui::rgba(row_highlight.color).into();
+            self.highlight_rows_with_color::<ExtensionRowHighlights>(
+                start..end,
+                color,
+                RowHighlightOptions {
+                    autoscroll: row_highlight.should_autoscroll,
+                    include_gutter: true,
+                },
+                cx,
+            );
+        }
+    }
+
+    pub fn clear_extension_decorations(&mut self, cx: &mut Context<Self>) {
+        if !self.extension_crease_ids.is_empty() {
+            let crease_ids = std::mem::take(&mut self.extension_crease_ids);
+            let removed = self.remove_creases(crease_ids, cx);
+            let ranges: Vec<Range<Anchor>> = removed.into_iter().map(|(_, range)| range).collect();
+            self.remove_folds_with_type(&ranges, TypeId::of::<ExtensionInlineFold>(), false, cx);
+        }
+        if !self.extension_block_ids.is_empty() {
+            let block_ids = std::mem::take(&mut self.extension_block_ids);
+            self.remove_blocks(block_ids, None, cx);
+        }
+    }
+
+    pub fn apply_extension_decorations(
+        &mut self,
+        decorations: &extension::EditorDecorations,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_extension_decorations(cx);
+        let snapshot = self.buffer().read(cx).snapshot(cx);
+        let weak_editor = cx.weak_entity();
+
+        let mut creases = Vec::with_capacity(decorations.inline_folds.len());
+        for fold in &decorations.inline_folds {
+            let start = snapshot.anchor_before(MultiBufferOffset(fold.range.start));
+            let end = snapshot.anchor_after(MultiBufferOffset(fold.range.end));
+            let placeholder = if let Some(canvas) = fold.render_canvas.clone() {
+                let weak_editor = weak_editor.clone();
+                FoldPlaceholder {
+                    render: Arc::new(move |_fold_id, _range, _cx| {
+                        render_extension_canvas_element(&canvas, weak_editor.clone())
+                    }),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: (!fold.placeholder_text.is_empty())
+                        .then(|| SharedString::from(fold.placeholder_text.clone())),
+                }
+            } else if fold.placeholder_text.is_empty() {
+                FoldPlaceholder {
+                    render: Arc::new(|_fold_id, _range, _cx| gpui::Empty.into_any_element()),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: None,
+                }
+            } else {
+                let text: SharedString = fold.placeholder_text.clone().into();
+                let render_text = text.clone();
+                FoldPlaceholder {
+                    render: Arc::new(move |fold_id, _range, cx| {
+                        FoldPlaceholder::fold_element(fold_id, cx)
+                            .child(render_text.clone())
+                            .into_any_element()
+                    }),
+                    constrain_width: false,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<ExtensionInlineFold>()),
+                    collapsed_text: Some(text),
+                }
+            };
+            creases.push(Crease::simple(start..end, placeholder));
+        }
+
+        if !creases.is_empty() {
+            self.extension_crease_ids = self.insert_creases(creases.clone(), cx);
+            self.display_map.update(cx, |map, cx| map.fold(creases, cx));
+            self.scrollbar_marker_state.dirty = true;
+            self.folds_did_change(cx);
+            self.inlay_hint_visibility_changed(cx);
+            cx.notify();
+        }
+
+        let mut blocks = Vec::with_capacity(decorations.blocks.len());
+        for block in &decorations.blocks {
+            let offset = MultiBufferOffset(block.anchor_offset as usize);
+            let anchor = if block.above {
+                snapshot.anchor_before(offset)
+            } else {
+                snapshot.anchor_after(offset)
+            };
+            let placement = if block.above {
+                BlockPlacement::Above(anchor)
+            } else {
+                BlockPlacement::Below(anchor)
+            };
+            let canvas = block.content.clone();
+            let weak_editor = weak_editor.clone();
+            blocks.push(BlockProperties {
+                placement,
+                height: Some(block.height_rows as u32),
+                style: BlockStyle::Fixed,
+                render: Arc::new(move |_cx| {
+                    render_extension_canvas_element(&canvas, weak_editor.clone())
+                }),
+                priority: 0,
+            });
+        }
+
+        if !blocks.is_empty() {
+            self.extension_block_ids = self.insert_blocks(blocks, None, cx).into_iter().collect();
+        }
+    }
+
+    pub fn refresh_extension_buffer_state(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.is_full() {
+            return;
+        }
+        let Some(proxy) = extension::ExtensionHostProxy::try_global(cx) else {
+            return;
+        };
+        let extensions = proxy.editor_extensions();
+        if extensions.is_empty() {
+            return;
+        }
+        let multi_buffer_snapshot = self.buffer().read(cx).snapshot(cx);
+        let Some(buffer_snapshot) = multi_buffer_snapshot.as_singleton() else {
+            return;
+        };
+        let Some(language) = buffer_snapshot.language().map(|l| l.name()) else {
+            return;
+        };
+        let buffer_text = buffer_snapshot.text();
+        let cursor_offset = self
+            .selections
+            .newest_anchor()
+            .head()
+            .to_offset(&multi_buffer_snapshot)
+            .0 as u32;
+
+        self.refresh_extension_buffer_state_task = cx.spawn(async move |this, cx| {
+            let mut merged_highlights = extension::EditorHighlights::default();
+            let mut merged_decorations = extension::EditorDecorations::default();
+            let mut has_highlights = false;
+            let mut has_decorations = false;
+
+            for ext in extensions {
+                if let Ok(highlights) = ext
+                    .editor_highlights_for_buffer(
+                        language.clone(),
+                        buffer_text.clone(),
+                        cursor_offset,
+                    )
+                    .await
+                {
+                    merged_highlights
+                        .text_highlights
+                        .extend(highlights.text_highlights);
+                    merged_highlights
+                        .row_highlights
+                        .extend(highlights.row_highlights);
+                    has_highlights = true;
+                }
+                if let Ok(decorations) = ext
+                    .editor_decorations_for_buffer(
+                        language.clone(),
+                        buffer_text.clone(),
+                        cursor_offset,
+                    )
+                    .await
+                {
+                    merged_decorations
+                        .inline_folds
+                        .extend(decorations.inline_folds);
+                    merged_decorations.blocks.extend(decorations.blocks);
+                    has_decorations = true;
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                if has_highlights {
+                    this.apply_extension_highlights(&merged_highlights, cx);
+                }
+                if has_decorations {
+                    this.apply_extension_decorations(&merged_decorations, cx);
+                }
+            })
+            .ok();
+        });
+    }
+
     pub fn show_local_cursors(&self, window: &mut Window, cx: &mut App) -> bool {
         (self.read_only(cx) || self.blink_manager.read(cx).visible())
             && self.focus_handle.is_focused(window)
@@ -10100,6 +10534,7 @@ impl Editor {
                 let snapshot = self.snapshot(window, cx);
                 self.refresh_matching_bracket_highlights(&snapshot, cx);
                 self.refresh_outline_symbols_at_cursor(cx);
+                self.refresh_extension_buffer_state(cx);
                 self.refresh_sticky_headers(&snapshot, cx);
                 if source.is_local() && self.has_active_edit_prediction() {
                     self.update_visible_edit_prediction(window, cx);
@@ -10241,6 +10676,7 @@ impl Editor {
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
                 cx.emit(EditorEvent::Reparsed(*buffer_id));
                 self.update_edit_prediction_settings(cx);
+                self.refresh_extension_buffer_state(cx);
                 cx.notify();
             }
             multi_buffer::Event::SettingsChanged => {
@@ -10505,6 +10941,7 @@ impl Editor {
         self.invalidate_semantic_tokens(None);
         self.refresh_semantic_tokens(None, false, cx);
         self.refresh_outline_symbols_at_cursor(cx);
+        self.refresh_extension_buffer_state(cx);
     }
 
     pub fn set_searchable(&mut self, searchable: bool) {
@@ -11532,6 +11969,23 @@ impl Editor {
             text_style.refine(text_style_refinement)
         }
 
+        let is_font_monospace = |font: &Font| {
+            let text_system = cx.text_system();
+            let font_id = text_system.resolve_font(font);
+            let i_advance = text_system.advance(font_id, px(14.0), 'i').ok();
+            let m_advance = text_system.advance(font_id, px(14.0), 'm').ok();
+            matches!((i_advance, m_advance), (Some(i), Some(m)) if (i.width - m.width).abs() < px(0.01))
+        };
+        let monospace_font = if is_font_monospace(&text_style.font()) {
+            None
+        } else if text_style.font_family != settings.buffer_font.family
+            && is_font_monospace(&settings.buffer_font)
+        {
+            Some(settings.buffer_font.clone())
+        } else {
+            Some(gpui::font(".ZedMono"))
+        };
+
         let background = match self.mode {
             EditorMode::SingleLine => cx.theme().system().transparent,
             EditorMode::AutoHeight { .. } => cx.theme().system().transparent,
@@ -11544,6 +11998,7 @@ impl Editor {
             border: cx.theme().colors().border,
             local_player: cx.theme().players().local(),
             text: text_style,
+            monospace_font,
             scrollbar_width: EditorElement::SCROLLBAR_WIDTH,
             syntax: cx.theme().syntax().clone(),
             status: cx.theme().status().clone(),
@@ -12376,7 +12831,7 @@ impl EditorSnapshot {
                     GitGutterSetting::TrackedFiles
                 )
             });
-            let gutter_settings = EditorSettings::get_global(cx).gutter;
+            let gutter_settings = self.gutter_settings;
             let show_line_numbers = self
                 .show_line_numbers
                 .unwrap_or(gutter_settings.line_numbers);

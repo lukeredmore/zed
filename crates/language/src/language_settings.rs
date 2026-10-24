@@ -79,6 +79,8 @@ pub struct LanguageSettings {
     pub wrap_guides: Vec<usize>,
     /// Indent guide related settings.
     pub indent_guides: IndentGuideSettings,
+    /// Gutter related settings.
+    pub gutter: GutterSettings,
     /// Whether or not to perform a buffer format before saving.
     pub format_on_save: FormatOnSave,
     /// Whether or not to remove any trailing whitespace from lines of a buffer
@@ -210,6 +212,18 @@ pub struct CompletionSettings {
     ///
     /// Default: "replace_suffix"
     pub lsp_insert_mode: LspInsertMode,
+}
+
+/// The settings for the editor gutter.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GutterSettings {
+    pub min_line_number_digits: usize,
+    pub line_numbers: bool,
+    pub runnables: bool,
+    pub breakpoints: bool,
+    pub bookmarks: bool,
+    pub folds: bool,
+    pub git_gutter_width: settings::GitGutterWidth,
 }
 
 /// The settings for indent guides.
@@ -833,6 +847,7 @@ impl settings::Settings for AllLanguageSettings {
             let completions = settings.completions.unwrap();
             let prettier = settings.prettier.unwrap();
             let indent_guides = settings.indent_guides.unwrap();
+            let gutter = settings.gutter.unwrap();
             let tasks = settings.tasks.unwrap();
             let whitespace_map = settings.whitespace_map.unwrap();
 
@@ -850,6 +865,15 @@ impl settings::Settings for AllLanguageSettings {
                     active_line_width: indent_guides.active_line_width.unwrap(),
                     coloring: indent_guides.coloring.unwrap(),
                     background_coloring: indent_guides.background_coloring.unwrap(),
+                },
+                gutter: GutterSettings {
+                    min_line_number_digits: gutter.min_line_number_digits.unwrap(),
+                    line_numbers: gutter.line_numbers.unwrap(),
+                    runnables: gutter.runnables.unwrap(),
+                    breakpoints: gutter.breakpoints.unwrap(),
+                    bookmarks: gutter.bookmarks.unwrap(),
+                    folds: gutter.folds.unwrap(),
+                    git_gutter_width: gutter.git_gutter_width.unwrap(),
                 },
                 format_on_save: settings.format_on_save.unwrap(),
                 remove_trailing_whitespace_on_save: settings
@@ -2028,5 +2052,43 @@ mod tests {
             "vtsls",
             "eslint",
         ]))
+    }
+
+    #[gpui::test]
+    fn test_per_language_gutter_settings(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::test(cx);
+            store
+                .set_user_settings(
+                    r#"{
+                        "gutter": {
+                            "line_numbers": true,
+                            "folds": true
+                        },
+                        "languages": {
+                            "Markdown": {
+                                "gutter": {
+                                    "line_numbers": false,
+                                    "folds": false
+                                }
+                            }
+                        }
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+
+            let all_settings = store.get::<AllLanguageSettings>(None);
+            assert!(all_settings.defaults.gutter.line_numbers);
+            assert!(all_settings.defaults.gutter.folds);
+
+            let markdown_settings = all_settings
+                .languages
+                .get(&LanguageName::new("Markdown"))
+                .unwrap();
+            assert!(!markdown_settings.gutter.line_numbers);
+            assert!(!markdown_settings.gutter.folds);
+            assert!(markdown_settings.gutter.runnables);
+        });
     }
 }

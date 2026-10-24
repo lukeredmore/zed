@@ -218,8 +218,21 @@ impl CachedMermaidDiagram {
             async move |this, cx| {
                 let value = cx
                     .background_spawn(async move {
-                        let svg_string =
-                            mermaid_render::render_to_svg(&contents.contents, &mermaid_theme)?;
+                        let svg_string = match mermaid_render::render_to_svg(
+                            &contents.contents,
+                            &mermaid_theme,
+                        ) {
+                            Ok(svg) => svg,
+                            Err(primary_err) => {
+                                let Some(svg) = crate::folio_dylib::render_mermaid_to_svg(
+                                    &contents.contents,
+                                    false,
+                                ) else {
+                                    return Err(anyhow::anyhow!("{primary_err}"));
+                                };
+                                svg
+                            }
+                        };
                         let tree = svg_renderer
                             .parse_svg(svg_string.as_bytes())
                             .map_err(|error| anyhow::anyhow!("{error}"))?;

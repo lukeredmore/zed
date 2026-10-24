@@ -79,16 +79,18 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut editor_settings = EditorSettings::get_global(cx).clone();
-        editor_settings.gutter.line_numbers = !editor_settings.gutter.line_numbers;
-        EditorSettings::override_global(editor_settings, cx);
+        self.show_line_numbers = Some(!self.line_numbers_enabled(cx));
+        cx.notify();
     }
 
     pub fn line_numbers_enabled(&self, cx: &App) -> bool {
-        if let Some(show_line_numbers) = self.show_line_numbers {
-            return show_line_numbers;
-        }
-        EditorSettings::get_global(cx).gutter.line_numbers
+        self.show_line_numbers.unwrap_or_else(|| {
+            self.buffer
+                .read(cx)
+                .language_settings(cx)
+                .gutter
+                .line_numbers
+        })
     }
 
     pub fn relative_line_numbers(&self, cx: &App) -> RelativeLineNumbers {

@@ -1424,6 +1424,11 @@ impl ExtensionStore {
 
         self.wasm_extensions
             .retain(|(extension, _)| !extensions_to_unload.contains(&extension.id));
+        self.proxy.clear_editor_extensions();
+        for (_, wasm_extension) in &self.wasm_extensions {
+            self.proxy
+                .register_editor_extension(Arc::new(wasm_extension.clone()));
+        }
         self.proxy.remove_user_themes(themes_to_remove);
         self.proxy.remove_icon_themes(icon_themes_to_remove);
         self.proxy
@@ -1677,6 +1682,7 @@ impl ExtensionStore {
 
                 for (manifest, wasm_extension) in &wasm_extensions {
                     let extension = Arc::new(wasm_extension.clone());
+                    this.proxy.register_editor_extension(extension.clone());
 
                     for (language_server_id, language_server_config) in &manifest.language_servers {
                         for language in language_server_config.languages() {

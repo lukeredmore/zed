@@ -690,12 +690,18 @@ pub fn dev_repo_root() -> Option<&'static std::path::Path> {
             std::env::current_dir().ok(),
         ];
         candidates.into_iter().flatten().find_map(|start| {
-            Some(
-                start
-                    .ancestors()
-                    .find(|dir| dir.join(".git").exists())?
-                    .to_path_buf(),
-            )
+            start.ancestors().find_map(|dir| {
+                if dir.join(".git").exists() && dir.join("assets/settings/default.json").exists() {
+                    Some(dir.to_path_buf())
+                } else if dir
+                    .join("third_party/zed/upstream/assets/settings/default.json")
+                    .exists()
+                {
+                    Some(dir.join("third_party/zed/upstream"))
+                } else {
+                    None
+                }
+            })
         })
     })
     .as_deref()

@@ -186,6 +186,24 @@ pub trait Extension: Send + Sync + 'static {
         locator_name: String,
         config: SpawnInTerminal,
     ) -> Result<DebugRequest>;
+
+    async fn editor_highlights_for_buffer(
+        &self,
+        _language_name: LanguageName,
+        _text: String,
+        _cursor_offset: u32,
+    ) -> Result<EditorHighlights> {
+        Ok(EditorHighlights::default())
+    }
+
+    async fn editor_decorations_for_buffer(
+        &self,
+        _language_name: LanguageName,
+        _text: String,
+        _cursor_offset: u32,
+    ) -> Result<EditorDecorations> {
+        Ok(EditorDecorations::default())
+    }
 }
 
 pub fn parse_wasm_extension_version(extension_id: &str, wasm_bytes: &[u8]) -> Result<Version> {

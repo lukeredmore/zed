@@ -31,7 +31,7 @@ use super::{
     render_breadcrumb_text,
 };
 use crate::{
-    BUFFER_HEADER_PADDING, DisplayRow, Editor, EditorSettings, EditorSnapshot, FILE_HEADER_HEIGHT,
+    BUFFER_HEADER_PADDING, DisplayRow, Editor, EditorSnapshot, FILE_HEADER_HEIGHT,
     GutterDimensions, JumpData, MULTI_BUFFER_EXCERPT_HEADER_HEIGHT, OpenExcerpts, Point, RowExt,
     SelectionEffects, StickyHeaderExcerpt, ToPoint, ToggleFold, ToggleFoldAll,
     display_map::ToDisplayPoint,
@@ -243,7 +243,7 @@ impl EditorElement {
     ) -> Option<StickyHeaders> {
         let show_line_numbers = snapshot
             .show_line_numbers
-            .unwrap_or_else(|| EditorSettings::get_global(cx).gutter.line_numbers);
+            .unwrap_or(snapshot.gutter_settings.line_numbers);
 
         let rows = Self::sticky_headers(self.editor.read(cx), snapshot);
 

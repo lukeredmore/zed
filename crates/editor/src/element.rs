@@ -74,7 +74,6 @@ use settings::{
 use smallvec::{SmallVec, smallvec};
 use std::{
     any::TypeId,
-    borrow::Cow,
     cell::Cell,
     cmp::{self, Ordering},
     fmt::{self, Write},
@@ -2787,7 +2786,14 @@ impl EditorElement {
             .ilog10()
             + 1;
 
-        let git_gutter_width = Self::gutter_strip_width(line_height, cx)
+        let gutter_settings = self
+            .editor
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .language_settings(cx)
+            .gutter;
+        let git_gutter_width = Self::gutter_strip_width(gutter_settings.git_gutter_width, line_height)
             + gutter_dimensions
                 .git_blame_entries_width
                 .unwrap_or_default();
@@ -2810,7 +2816,7 @@ impl EditorElement {
 
                 let editor = self.editor.clone();
                 let is_wide = max_line_number_length
-                    >= EditorSettings::get_global(cx).gutter.min_line_number_digits as u32
+                    >= gutter_settings.min_line_number_digits as u32
                     && row_info
                         .buffer_row
                         .is_some_and(|row| (row + 1).ilog10() + 1 == max_line_number_length)
@@ -2861,7 +2867,7 @@ impl EditorElement {
         let include_line_numbers = gutter
             .snapshot
             .show_line_numbers
-            .unwrap_or_else(|| EditorSettings::get_global(cx).gutter.line_numbers);
+            .unwrap_or(gutter.snapshot.gutter_settings.line_numbers);
         if !include_line_numbers {
             return Arc::default();
         }
@@ -2976,7 +2982,7 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<Option<AnyElement>> {
-        let include_fold_statuses = EditorSettings::get_global(cx).gutter.folds
+        let include_fold_statuses = snapshot.gutter_settings.folds
             && snapshot.mode.is_full()
             && snapshot.display_snapshot.companion_snapshot().is_none()
             && self.editor.read(cx).buffer_kind(cx) == ItemBufferKind::Singleton;
@@ -5442,8 +5448,8 @@ impl EditorElement {
     const DELETED_MARKER_WIDTH_RATIO: f32 = 0.35 / Self::DEFAULT_STRIP_WIDTH_RATIO;
     const MIN_DELETED_MARKER_WIDTH_RATIO: f32 = 0.2;
 
-    fn gutter_strip_width(line_height: Pixels, cx: &App) -> Pixels {
-        match EditorSettings::get_global(cx).gutter.git_gutter_width {
+    fn gutter_strip_width(setting: GitGutterWidth, line_height: Pixels) -> Pixels {
+        match setting {
             GitGutterWidth::Custom(width) => px(*width),
             GitGutterWidth::Default => (Self::DEFAULT_STRIP_WIDTH_RATIO * line_height).floor(),
         }
@@ -5474,10 +5480,11 @@ impl EditorElement {
         gutter_bounds: Bounds<Pixels>,
         hunk: &DisplayDiffHunk,
         snapshot: &EditorSnapshot,
-        cx: &App,
+        _cx: &App,
     ) -> Bounds<Pixels> {
         let scroll_top = scroll_position.y * ScrollPixelOffset::from(line_height);
-        let gutter_strip_width = Self::gutter_strip_width(line_height, cx);
+        let gutter_strip_width =
+            Self::gutter_strip_width(snapshot.gutter_settings.git_gutter_width, line_height);
 
         match hunk {
             DisplayDiffHunk::Folded { display_row, .. } => {
@@ -5504,7 +5511,7 @@ impl EditorElement {
                     let end_y = start_y + line_height;
 
                     let width = Self::deleted_marker_base_width(
-                        EditorSettings::get_global(cx).gutter.git_gutter_width,
+                        snapshot.gutter_settings.git_gutter_width,
                         line_height,
                     );
                     let highlight_origin = gutter_bounds.origin + point(px(0.), start_y);
@@ -7044,8 +7051,10 @@ impl Gutter<'_> {
             AvailableSpace::Definite(self.line_height),
         );
         let indicator_size = button.layout_as_root(available_space, window, cx);
-        let git_gutter_width = EditorElement::gutter_strip_width(self.line_height, cx)
-            + self.dimensions.git_blame_entries_width.unwrap_or_default();
+        let git_gutter_width = EditorElement::gutter_strip_width(
+            self.snapshot.gutter_settings.git_gutter_width,
+            self.line_height,
+        ) + self.dimensions.git_blame_entries_width.unwrap_or_default();
 
         let x = git_gutter_width + px(2.);
 
@@ -7421,12 +7430,13 @@ impl LineWithInvisibles {
         for highlighted_chunk in chunks.chain([HighlightedChunk {
             text: "\n",
             style: None,
+            is_monospace: false,
             diagnostic_underline_severity: None,
             is_tab: false,
             is_inlay: false,
             replacement: None,
         }]) {
-            if let Some(replacement) = highlighted_chunk.replacement {
+            if let Some(replacement) = highlighted_chunk.replacement.clone() {
                 if line_exceeded_max_len {
                     continue;
                 }
@@ -7468,7 +7478,7 @@ impl LineWithInvisibles {
                             let shaped_line = window.text_system().shape_line(
                                 chunk,
                                 font_size,
-                                &[text_style.to_run(highlighted_chunk.text.len())],
+                                &[editor_style.text_run(&highlighted_chunk, highlighted_chunk.text.len())],
                                 None,
                             );
                             AvailableSpace::Definite(shaped_line.width)
@@ -7499,20 +7509,7 @@ impl LineWithInvisibles {
                         });
                     }
                     ChunkReplacement::Str(x) => {
-                        let text_style = if let Some(style) = highlighted_chunk.style {
-                            Cow::Owned(text_style.clone().highlight(style))
-                        } else {
-                            Cow::Borrowed(text_style)
-                        };
-
-                        let run = TextRun {
-                            len: x.len(),
-                            font: text_style.font(),
-                            color: text_style.color,
-                            background_color: text_style.background_color,
-                            underline: text_style.underline,
-                            strikethrough: text_style.strikethrough,
-                        };
+                        let run = editor_style.text_run(&highlighted_chunk, x.len());
 
                         let line_layout = window
                             .text_system()
@@ -7574,12 +7571,6 @@ impl LineWithInvisibles {
                     }
 
                     if !line_chunk.is_empty() && !line_exceeded_max_len {
-                        let text_style = if let Some(style) = highlighted_chunk.style {
-                            Cow::Owned(text_style.clone().highlight(style))
-                        } else {
-                            Cow::Borrowed(text_style)
-                        };
-
                         let current_line_len = len + line.len();
                         if current_line_len + line_chunk.len() > max_line_len {
                             let mut chunk_len = max_line_len - current_line_len;
@@ -7594,14 +7585,7 @@ impl LineWithInvisibles {
                             continue;
                         }
 
-                        styles.push(TextRun {
-                            len: line_chunk.len(),
-                            font: text_style.font(),
-                            color: text_style.color,
-                            background_color: text_style.background_color,
-                            underline: text_style.underline,
-                            strikethrough: text_style.strikethrough,
-                        });
+                        styles.push(editor_style.text_run(&highlighted_chunk, line_chunk.len()));
 
                         if let Some(severity) = highlighted_chunk.diagnostic_underline_severity {
                             diagnostic_underline_severity_ranges.push((
@@ -9614,7 +9598,7 @@ impl Element for EditorElement {
                         cx,
                     );
 
-                    let gutter_settings = EditorSettings::get_global(cx).gutter;
+                    let gutter_settings = snapshot.gutter_settings;
 
                     let context_menu_layout =
                         if let Some(newest_selection_head) = newest_selection_head {
@@ -9713,10 +9697,11 @@ impl Element for EditorElement {
                         );
                     }
 
-                    let git_gutter_width = Self::gutter_strip_width(line_height, cx)
-                        + gutter_dimensions
-                            .git_blame_entries_width
-                            .unwrap_or_default();
+                    let git_gutter_width =
+                        Self::gutter_strip_width(gutter_settings.git_gutter_width, line_height)
+                            + gutter_dimensions
+                                .git_blame_entries_width
+                                .unwrap_or_default();
                     let available_width = gutter_dimensions.left_padding - git_gutter_width;
 
                     let max_line_number_length = self
@@ -9738,8 +9723,7 @@ impl Element for EditorElement {
                         )
                         .map(|(display_row, buffer_row)| {
                             let is_wide = max_line_number_length
-                                >= EditorSettings::get_global(cx).gutter.min_line_number_digits
-                                    as u32
+                                >= gutter_settings.min_line_number_digits as u32
                                 && buffer_row.is_some_and(|row| {
                                     (row + 1).ilog10() + 1 == max_line_number_length
                                 })
@@ -12151,7 +12135,13 @@ mod tests {
         cx.update(|cx| {
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.editor.gutter.get_or_insert_default().folds = Some(false);
+                    settings
+                        .project
+                        .all_languages
+                        .defaults
+                        .gutter
+                        .get_or_insert_default()
+                        .folds = Some(false);
                 });
             });
         });
@@ -12182,7 +12172,13 @@ mod tests {
         cx.update(|cx| {
             settings::SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |settings| {
-                    settings.editor.gutter.get_or_insert_default().folds = Some(false);
+                    settings
+                        .project
+                        .all_languages
+                        .defaults
+                        .gutter
+                        .get_or_insert_default()
+                        .folds = Some(false);
                     settings.editor.sticky_scroll = Some(settings::StickyScrollContent {
                         enabled: Some(true),
                     });
@@ -13192,6 +13188,7 @@ mod tests {
                     diagnostic_underline_severity: None,
                     is_tab: false,
                     is_inlay: false,
+                    is_monospace: false,
                     replacement: Some(ChunkReplacement::Str("\u{2007}".into())),
                 })
                 .chain(std::iter::once(HighlightedChunk {
@@ -13200,6 +13197,7 @@ mod tests {
                     diagnostic_underline_severity: None,
                     is_tab: false,
                     is_inlay: false,
+                    is_monospace: false,
                     replacement: None,
                 }))
                 .chain(
@@ -13209,6 +13207,7 @@ mod tests {
                         diagnostic_underline_severity: None,
                         is_tab: false,
                         is_inlay: false,
+                        is_monospace: false,
                         replacement: Some(ChunkReplacement::Str("\u{2007}".into())),
                     })
                     .take(8),
@@ -13232,6 +13231,44 @@ mod tests {
                 assert!(layouts[0].fragments.len() <= max_line_len);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn test_proportional_font_monospace_text_run() {
+        let mut style = EditorStyle::default();
+        style.text.font_family = ".ZedSans".into();
+        style.monospace_font = Some(gpui::font(".ZedMono"));
+
+        let prose_chunk = HighlightedChunk {
+            text: "prose",
+            style: None,
+            diagnostic_underline_severity: None,
+            is_tab: false,
+            is_inlay: false,
+            is_monospace: false,
+            replacement: None,
+        };
+        let code_chunk = HighlightedChunk {
+            text: "code",
+            style: Some(gpui::HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            }),
+            diagnostic_underline_severity: None,
+            is_tab: false,
+            is_inlay: false,
+            is_monospace: true,
+            replacement: None,
+        };
+
+        let prose_run = style.text_run(&prose_chunk, prose_chunk.text.len());
+        assert_eq!(prose_run.font.family.as_ref(), ".ZedSans");
+
+        let code_run = style.text_run(&code_chunk, code_chunk.text.len());
+        assert_eq!(code_run.font.family.as_ref(), ".ZedMono");
+        assert_eq!(code_run.font.weight, FontWeight::BOLD);
+        assert_eq!(code_run.font.style, gpui::FontStyle::Italic);
     }
 
     #[gpui::test]

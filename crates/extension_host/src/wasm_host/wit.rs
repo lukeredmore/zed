@@ -62,8 +62,10 @@ pub fn wasm_api_version_range(release_channel: ReleaseChannel) -> RangeInclusive
     let _ = release_channel;
 
     let max_version = match release_channel {
-        ReleaseChannel::Dev | ReleaseChannel::Nightly => latest::MAX_VERSION,
-        ReleaseChannel::Stable | ReleaseChannel::Preview => since_v0_6_0::MAX_VERSION,
+        ReleaseChannel::Dev
+        | ReleaseChannel::Nightly
+        | ReleaseChannel::Stable
+        | ReleaseChannel::Preview => latest::MAX_VERSION,
     };
 
     since_v0_0_1::MIN_VERSION..=max_version
@@ -76,11 +78,10 @@ pub fn authorize_access_to_unreleased_wasm_api_version(
     release_channel: ReleaseChannel,
 ) -> Result<()> {
     let allow_unreleased_version = match release_channel {
-        ReleaseChannel::Dev | ReleaseChannel::Nightly => true,
-        ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            // We always allow the latest in tests so that the extension tests pass on release branches.
-            cfg!(any(test, feature = "test-support"))
-        }
+        ReleaseChannel::Dev
+        | ReleaseChannel::Nightly
+        | ReleaseChannel::Stable
+        | ReleaseChannel::Preview => true,
     };
 
     anyhow::ensure!(
@@ -1283,6 +1284,54 @@ impl Extension {
             | Extension::V0_0_1(_) => Err(wasmtime::Error::msg(
                 "`run_dap_locator` not available prior to v0.6.0",
             )),
+        }
+    }
+
+    pub async fn call_editor_highlights_for_buffer(
+        &self,
+        store: &mut Store<WasmState>,
+        language_name: &LanguageName,
+        text: &str,
+        cursor_offset: u32,
+    ) -> wasmtime::Result<Result<extension::EditorHighlights, String>> {
+        match self {
+            Extension::V0_8_0(ext) => Ok(ext
+                .call_editor_highlights_for_buffer(store, &language_name.0, text, cursor_offset)
+                .await?
+                .map(Into::into)),
+            Extension::V0_6_0(_)
+            | Extension::V0_5_0(_)
+            | Extension::V0_4_0(_)
+            | Extension::V0_3_0(_)
+            | Extension::V0_2_0(_)
+            | Extension::V0_1_0(_)
+            | Extension::V0_0_6(_)
+            | Extension::V0_0_4(_)
+            | Extension::V0_0_1(_) => Ok(Ok(extension::EditorHighlights::default())),
+        }
+    }
+
+    pub async fn call_editor_decorations_for_buffer(
+        &self,
+        store: &mut Store<WasmState>,
+        language_name: &LanguageName,
+        text: &str,
+        cursor_offset: u32,
+    ) -> wasmtime::Result<Result<extension::EditorDecorations, String>> {
+        match self {
+            Extension::V0_8_0(ext) => Ok(ext
+                .call_editor_decorations_for_buffer(store, &language_name.0, text, cursor_offset)
+                .await?
+                .map(Into::into)),
+            Extension::V0_6_0(_)
+            | Extension::V0_5_0(_)
+            | Extension::V0_4_0(_)
+            | Extension::V0_3_0(_)
+            | Extension::V0_2_0(_)
+            | Extension::V0_1_0(_)
+            | Extension::V0_0_6(_)
+            | Extension::V0_0_4(_)
+            | Extension::V0_0_1(_) => Ok(Ok(extension::EditorDecorations::default())),
         }
     }
 }
