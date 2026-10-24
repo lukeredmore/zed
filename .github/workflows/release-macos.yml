@@ -48,6 +48,10 @@ jobs:
           echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
           echo "short_sha=${SHORT_SHA}" >> "${GITHUB_OUTPUT}"
 
+      - name: Smoke test Zed.dmg
+        run: |
+          python3 -I ./script/zed_smoke_test.py dist/Zed.dmg
+
       - name: Publish rolling latest GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

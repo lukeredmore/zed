@@ -1082,7 +1082,7 @@ impl SshRemoteConnection {
                     dst_path
                 )
             }
-            _ => Ok(Some(AppVersion::global(cx))),
+            _ => Ok(Some(AppVersion::upstream(cx))),
         })?;
 
         let tmp_path_compressed = remote_server_dir_relative().join(

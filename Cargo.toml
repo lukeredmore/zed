@@ -1087,9 +1087,13 @@ wasmtime-environ = { opt-level = 3 }
 wasmtime-internal-cranelift = { opt-level = 3 }
 minidumper = { opt-level = 3 }
 serde_json = { opt-level = 3 }
+rust-embed = { debug-assertions = false }
+assets = { codegen-units = 1, debug-assertions = false }
+settings = { debug-assertions = false }
+grammars = { debug-assertions = false }
+agent = { debug-assertions = false }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }
-assets = { codegen-units = 1 }
 breadcrumbs = { codegen-units = 1 }
 collections = { codegen-units = 1 }
 command_palette = { codegen-units = 1 }

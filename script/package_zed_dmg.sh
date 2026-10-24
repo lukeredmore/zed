@@ -99,7 +99,7 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>${FULL_VERSION}</string>
+  <string>${UPSTREAM_VERSION}</string>
   <key>CFBundleVersion</key>
   <string>${BUILD_NUMBER}</string>
   <key>LSMinimumSystemVersion</key>
@@ -112,6 +112,10 @@ cat > "${APP_DIR}/Contents/Info.plist" <<EOF
   <string>stable</string>
   <key>ZedUpstreamVersion</key>
   <string>${UPSTREAM_VERSION}</string>
+  <key>ZedFullVersion</key>
+  <string>${FULL_VERSION}</string>
+  <key>ZedCommitSHA</key>
+  <string>${SHORT_SHA}</string>
   <key>ZedGitCommit</key>
   <string>${GIT_SHA}</string>
 </dict>
