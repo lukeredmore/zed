@@ -302,10 +302,17 @@ fn main() {
     #[cfg(unix)]
     util::increase_open_file_limit().log_err();
 
-    let version = option_env!("ZED_BUILD_ID");
-    let app_commit_sha =
-        option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
-    let app_version = AppVersion::load(env!("CARGO_PKG_VERSION"), version, app_commit_sha.clone());
+    let version = option_env!("ZED_BUILD_ID")
+        .map(ToOwned::to_owned)
+        .or_else(|| release_channel::bundled_info_plist_value("CFBundleVersion"));
+    let app_commit_sha = option_env!("ZED_COMMIT_SHA")
+        .map(ToOwned::to_owned)
+        .or_else(|| release_channel::bundled_info_plist_value("ZedCommitSHA"))
+        .or_else(|| release_channel::bundled_info_plist_value("FolioCommitSHA"))
+        .map(AppCommitSha::new);
+    let pkg_version = release_channel::bundled_info_plist_value("CFBundleShortVersionString")
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let app_version = AppVersion::load(&pkg_version, version.as_deref(), app_commit_sha.clone());
 
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
@@ -338,6 +345,18 @@ fn main() {
 
     #[cfg(windows)]
     check_for_conpty_dll();
+
+    #[cfg(target_os = "macos")]
+    if *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev
+        && std::env::var_os("ZED_DEV_ICON_PATH").is_none()
+    {
+        let dev_icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/app-icon-dev@2x.png");
+        if dev_icon.exists() {
+            unsafe {
+                std::env::set_var("ZED_DEV_ICON_PATH", dev_icon);
+            }
+        }
+    }
 
     let app = build_application()
         .with_assets(Assets)
@@ -490,6 +509,12 @@ fn main() {
         zed_actions::init();
 
         release_channel::init(app_version, cx);
+        AppVersion::set_upstream(
+            env!("CARGO_PKG_VERSION")
+                .parse()
+                .expect("invalid version in Cargo.toml"),
+            cx,
+        );
         gpui_tokio::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);

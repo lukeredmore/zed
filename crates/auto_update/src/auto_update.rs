@@ -195,6 +195,80 @@ pub struct ReleaseAsset {
     pub url: String,
 }
 
+const ZED_FORK_GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/lukeredmore/zed/releases/latest";
+const ZED_FORK_RELEASE_METADATA_PREFIX: &str = "<!-- zed-release:";
+
+#[derive(Deserialize, Debug)]
+struct GithubReleaseResponse {
+    tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct EmbeddedZedReleaseMetadata {
+    version: String,
+}
+
+fn parse_github_release_asset(
+    body: &[u8],
+    os: &str,
+    arch: &str,
+) -> Result<ReleaseAsset> {
+    let release: GithubReleaseResponse = serde_json::from_slice(body).with_context(|| {
+        format!(
+            "error deserializing GitHub release {:?}",
+            String::from_utf8_lossy(body),
+        )
+    })?;
+
+    let version = release
+        .body
+        .as_deref()
+        .and_then(|notes| {
+            let start = notes.find(ZED_FORK_RELEASE_METADATA_PREFIX)?;
+            let after_prefix = &notes[start + ZED_FORK_RELEASE_METADATA_PREFIX.len()..];
+            let end = after_prefix.find("-->")?;
+            let json_str = after_prefix[..end].trim();
+            serde_json::from_str::<EmbeddedZedReleaseMetadata>(json_str)
+                .ok()
+                .map(|meta| meta.version)
+        })
+        .unwrap_or_else(|| release.tag_name.trim_start_matches('v').to_string());
+
+    let preferred_names: Vec<String> = match os {
+        "macos" => vec![format!("Zed-{arch}.dmg"), "Zed.dmg".to_string()],
+        "linux" => vec![format!("zed-linux-{arch}.tar.gz"), "zed.tar.gz".to_string()],
+        "windows" => vec![format!("Zed-{arch}.exe"), "Zed.exe".to_string()],
+        _ => vec!["Zed.dmg".to_string()],
+    };
+
+    let matched_asset = preferred_names
+        .iter()
+        .find_map(|expected| release.assets.iter().find(|a| &a.name == expected))
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|a| a.name.ends_with(".dmg") || a.name.ends_with(".tar.gz"))
+        })
+        .context("no matching release asset found in lukeredmore/zed latest release")?;
+
+    Ok(ReleaseAsset {
+        version,
+        url: matched_asset.browser_download_url.clone(),
+    })
+}
+
 struct MacOsUnmounter<'a> {
     mount_path: PathBuf,
     background_executor: &'a BackgroundExecutor,
@@ -346,19 +420,12 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
     let url = match release_channel {
         ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
+            "https://github.com/lukeredmore/zed/releases/latest".to_string()
         }
         ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
+            "https://github.com/lukeredmore/zed/commits/main/".to_string()
         }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
+        ReleaseChannel::Dev => "https://github.com/lukeredmore/zed/commits/main/".to_string(),
     };
     Some(url)
 }
@@ -684,6 +751,30 @@ impl AutoUpdater {
         cx: &mut AsyncApp,
     ) -> Result<ReleaseAsset> {
         let client = this.read_with(cx, |this, _| this.client.clone());
+        let http_client = client.http_client();
+
+        if asset == "zed" && (!cfg!(test) || env::var("ZED_RELEASE_API_URL").is_ok()) {
+            let url = env::var("ZED_RELEASE_API_URL")
+                .unwrap_or_else(|_| ZED_FORK_GITHUB_LATEST_RELEASE_URL.to_string());
+            let request = http_client::Request::builder()
+                .method(http_client::Method::GET)
+                .uri(url.as_str())
+                .header(http_client::http::header::USER_AGENT, "Zed")
+                .header(
+                    http_client::http::header::ACCEPT,
+                    "application/vnd.github+json",
+                )
+                .body(http_client::AsyncBody::default())?;
+            let mut response = http_client.send(request).await?;
+            let mut body = Vec::new();
+            response.body_mut().read_to_end(&mut body).await?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "failed to fetch lukeredmore/zed release: {:?}",
+                String::from_utf8_lossy(&body),
+            );
+            return parse_github_release_asset(&body, os, arch);
+        }
 
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
             (
@@ -957,13 +1048,37 @@ impl AutoUpdater {
         }
     }
 
+    fn extract_stable_build_number(build: &semver::BuildMetadata) -> Option<u64> {
+        let mut parts = build.as_str().split('.');
+        match (parts.next(), parts.next()) {
+            (Some("stable"), Some(num)) => num.parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
     fn check_if_fetched_version_is_newer_non_nightly(
         mut installed_version: Version,
-        fetched_version: Version,
+        mut fetched_version: Version,
     ) -> Option<Version> {
+        if let Some(fetched_build) = Self::extract_stable_build_number(&fetched_version.build) {
+            let installed_build =
+                Self::extract_stable_build_number(&installed_version.build).unwrap_or(0);
+            let mut installed_base = installed_version.clone();
+            installed_base.pre = semver::Prerelease::EMPTY;
+            installed_base.build = semver::BuildMetadata::EMPTY;
+            let mut fetched_base = fetched_version.clone();
+            fetched_base.pre = semver::Prerelease::EMPTY;
+            fetched_base.build = semver::BuildMetadata::EMPTY;
+            return (fetched_base > installed_base
+                || (fetched_base == installed_base && fetched_build > installed_build))
+                .then_some(fetched_version);
+        }
+
         // For non-nightly releases, ignore build and pre-release fields as they're not provided by our endpoints right now.
         installed_version.pre = semver::Prerelease::EMPTY;
         installed_version.build = semver::BuildMetadata::EMPTY;
+        fetched_version.pre = semver::Prerelease::EMPTY;
+        fetched_version.build = semver::BuildMetadata::EMPTY;
         (fetched_version > installed_version).then_some(fetched_version)
     }
 

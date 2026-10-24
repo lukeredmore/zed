@@ -1308,6 +1308,16 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
         let policy = get_mac_platform(this).0.lock().activation_policy;
         app.setActivationPolicy_(native_activation_policy(policy));
 
+        if let Ok(icon_path) = std::env::var("ZED_DEV_ICON_PATH") {
+            let ns_path = ns_string(&icon_path);
+            let image: id = msg_send![class!(NSImage), alloc];
+            let image: id = msg_send![image, initWithContentsOfFile: ns_path];
+            if image != nil {
+                let _: () = msg_send![app, setApplicationIconImage: image];
+                let _: () = msg_send![image, release];
+            }
+        }
+
         let notification_center: *mut Object =
             msg_send![class!(NSNotificationCenter), defaultCenter];
         let name = ns_string("NSTextInputContextKeyboardSelectionDidChangeNotification");
