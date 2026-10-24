@@ -102,6 +102,74 @@ async fn with_remote_sync_timeout<T>(
     }
 }
 
+const FOLIO_EXTENSION_ID: &str = "folio-markdown-outline";
+const FOLIO_EXTENSION_DOWNLOAD_URL: &str =
+    "https://github.com/lukeredmore/folio/releases/latest/download/folio-markdown-outline.tar.gz";
+const FOLIO_GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/lukeredmore/folio/releases/latest";
+const FOLIO_RELEASE_METADATA_PREFIX: &str = "<!-- folio-release:";
+
+#[derive(Deserialize)]
+struct FolioGithubReleaseResponse {
+    #[serde(default)]
+    body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EmbeddedFolioReleaseMetadata {
+    #[serde(default)]
+    extension_version: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
+fn folio_extension_metadata(version: Arc<str>) -> ExtensionMetadata {
+    serde_json::from_value(serde_json::json!({
+        "id": FOLIO_EXTENSION_ID,
+        "name": "Folio Markdown Outline",
+        "version": version,
+        "description": "Typora-style WYSIWYG Markdown preview editor, proportional typography, and LaTeX math canvas for Zed.",
+        "authors": ["Folio Contributors"],
+        "repository": "https://github.com/lukeredmore/folio",
+        "schema_version": 1,
+        "wasm_api_version": "0.8.0",
+        "provides": ["languages"],
+        "published_at": "1970-01-01T00:00:00Z",
+        "download_count": 1
+    }))
+    .expect("valid Folio ExtensionMetadata JSON")
+}
+
+async fn fetch_latest_folio_extension_version(
+    http_client: Arc<HttpClientWithUrl>,
+) -> Option<Arc<str>> {
+    let request = http_client::Request::builder()
+        .method(http_client::Method::GET)
+        .uri(FOLIO_GITHUB_LATEST_RELEASE_URL)
+        .header(http_client::http::header::USER_AGENT, "Zed")
+        .header(
+            http_client::http::header::ACCEPT,
+            "application/vnd.github+json",
+        )
+        .body(AsyncBody::empty())
+        .ok()?;
+    let mut response = http_client.send(request).await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut body = Vec::new();
+    response.body_mut().read_to_end(&mut body).await.ok()?;
+    let release: FolioGithubReleaseResponse = serde_json::from_slice(&body).ok()?;
+    let notes = release.body?;
+    let start = notes.find(FOLIO_RELEASE_METADATA_PREFIX)?;
+    let after_prefix = &notes[start + FOLIO_RELEASE_METADATA_PREFIX.len()..];
+    let end = after_prefix.find("-->")?;
+    let meta: EmbeddedFolioReleaseMetadata =
+        serde_json::from_str(after_prefix[..end].trim()).ok()?;
+    let version = meta.extension_version.or(meta.version)?;
+    Some(version.into())
+}
+
 /// Extensions that should no longer be loaded or downloaded.
 ///
 /// These snippets should no longer be downloaded or loaded, because their
@@ -670,6 +738,23 @@ impl ExtensionStore {
             query.push(("filter", search));
         }
 
+        let include_folio = !cfg!(test)
+            && provides_filter.is_none_or(|filter| {
+                filter.is_empty() || filter.contains(&ExtensionProvides::Languages)
+            })
+            && search.is_none_or(|s| {
+                let s = s.trim().to_ascii_lowercase();
+                s.is_empty()
+                    || "folio-markdown-outline".contains(&s)
+                    || "folio markdown outline wysiwyg".contains(&s)
+            });
+        let installed_folio_version = self
+            .extension_index
+            .extensions
+            .get(FOLIO_EXTENSION_ID)
+            .map(|entry| entry.manifest.version.clone());
+        let http_client = self.http_client.clone();
+
         let provides_filter = provides_filter.map(|provides_filter| {
             provides_filter
                 .iter()
@@ -681,7 +766,22 @@ impl ExtensionStore {
             query.push(("provides", provides_filter));
         }
 
-        self.fetch_extensions_from_api("/extensions", &query, cx)
+        let api_task = self.fetch_extensions_from_api("/extensions", &query, cx);
+        if !include_folio {
+            return api_task;
+        }
+
+        cx.spawn(async move |_, _| {
+            let mut extensions = api_task.await.unwrap_or_default();
+            if !extensions.iter().any(|ext| ext.id.as_ref() == FOLIO_EXTENSION_ID) {
+                let latest_version = fetch_latest_folio_extension_version(http_client)
+                    .await
+                    .or(installed_folio_version)
+                    .unwrap_or_else(|| "0.2.0".into());
+                extensions.insert(0, folio_extension_metadata(latest_version));
+            }
+            Ok(extensions)
+        })
     }
 
     pub fn fetch_extensions_with_update_available(
@@ -691,11 +791,24 @@ impl ExtensionStore {
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
         let extension_settings = ExtensionSettings::get_global(cx);
+        let check_folio_update = !cfg!(test)
+            && self
+                .extension_index
+                .extensions
+                .get(FOLIO_EXTENSION_ID)
+                .is_some_and(|entry| {
+                    !entry.dev && extension_settings.should_auto_update(FOLIO_EXTENSION_ID)
+                });
+        let http_client = self.http_client.clone();
         let extension_ids = self
             .extension_index
             .extensions
             .iter()
-            .filter(|(id, entry)| !entry.dev && extension_settings.should_auto_update(id))
+            .filter(|(id, entry)| {
+                !entry.dev
+                    && id.as_ref() != FOLIO_EXTENSION_ID
+                    && extension_settings.should_auto_update(id)
+            })
             .map(|(id, _)| id.as_ref())
             .collect::<Vec<_>>()
             .join(",");
@@ -714,7 +827,17 @@ impl ExtensionStore {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            let extensions = task.await?;
+            let mut extensions = if extension_ids.is_empty() && check_folio_update {
+                Vec::new()
+            } else {
+                task.await?
+            };
+            if check_folio_update
+                && let Some(latest_folio_version) =
+                    fetch_latest_folio_extension_version(http_client).await
+            {
+                extensions.push(folio_extension_metadata(latest_folio_version));
+            }
             this.update(cx, |this, _cx| {
                 extensions
                     .into_iter()
@@ -736,6 +859,21 @@ impl ExtensionStore {
         extension_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
+        if !cfg!(test) && extension_id == FOLIO_EXTENSION_ID {
+            let http_client = self.http_client.clone();
+            let installed_version = self
+                .extension_index
+                .extensions
+                .get(FOLIO_EXTENSION_ID)
+                .map(|entry| entry.manifest.version.clone());
+            return cx.spawn(async move |_, _| {
+                let version = fetch_latest_folio_extension_version(http_client)
+                    .await
+                    .or(installed_version)
+                    .unwrap_or_else(|| "0.2.0".into());
+                Ok(vec![folio_extension_metadata(version)])
+            });
+        }
         self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
     }
 
@@ -975,6 +1113,19 @@ impl ExtensionStore {
     pub fn install_latest_extension(&mut self, extension_id: Arc<str>, cx: &mut Context<Self>) {
         log::info!("installing extension {extension_id} latest version");
 
+        if !cfg!(test) && extension_id.as_ref() == FOLIO_EXTENSION_ID {
+            if let Ok(url) = Url::parse(FOLIO_EXTENSION_DOWNLOAD_URL) {
+                self.install_or_upgrade_extension_at_endpoint(
+                    extension_id,
+                    url,
+                    ExtensionOperation::Install,
+                    cx,
+                )
+                .detach_and_log_err(cx);
+            }
+            return;
+        }
+
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
 
@@ -1023,6 +1174,12 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         log::info!("installing extension {extension_id} {version}");
+        if !cfg!(test) && extension_id.as_ref() == FOLIO_EXTENSION_ID {
+            let Some(url) = Url::parse(FOLIO_EXTENSION_DOWNLOAD_URL).log_err() else {
+                return Task::ready(Ok(()));
+            };
+            return self.install_or_upgrade_extension_at_endpoint(extension_id, url, operation, cx);
+        }
         let Some(url) = self
             .http_client
             .build_zed_api_url(

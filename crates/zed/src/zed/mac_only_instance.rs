@@ -13,6 +13,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(10);
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(35);
 const SEND_TIMEOUT: Duration = Duration::from_millis(20);
 const USER_BLOCK: u16 = 100;
+const MODDED_PORT_OFFSET: u16 = 4 * USER_BLOCK;
 
 fn address() -> SocketAddr {
     // These port numbers are offset by the user ID to avoid conflicts between
@@ -27,12 +28,13 @@ fn address() -> SocketAddr {
     // 44338, 44438, and 44538 for the preview, stable, and nightly channels,
     // respectively. User 502 will use ports 44339, 44439, and 44539 for the preview,
     // stable, and nightly channels, respectively.
-    let port = match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => 43737,
-        ReleaseChannel::Preview => 43737 + USER_BLOCK,
-        ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
-        ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
-    };
+    let port = MODDED_PORT_OFFSET
+        + match *release_channel::RELEASE_CHANNEL {
+            ReleaseChannel::Dev => 43737,
+            ReleaseChannel::Preview => 43737 + USER_BLOCK,
+            ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
+            ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
+        };
     let uid = getuid().as_raw();
     // Ensure that the user ID is not too large to avoid overflow when
     // calculating the port number. This seems unlikely but it doesn't
@@ -46,10 +48,10 @@ fn address() -> SocketAddr {
 
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "Zed Modded Editor Dev Instance Running",
+        ReleaseChannel::Nightly => "Zed Modded Editor Nightly Instance Running",
+        ReleaseChannel::Preview => "Zed Modded Editor Preview Instance Running",
+        ReleaseChannel::Stable => "Zed Modded Editor Stable Instance Running",
     }
 }
 

@@ -85,7 +85,7 @@ impl DockerExecConnection {
         let (release_channel, version, commit) = cx.update(|cx| {
             (
                 ReleaseChannel::global(cx),
-                AppVersion::global(cx),
+                AppVersion::upstream(cx),
                 AppCommitSha::try_global(cx),
             )
         });
@@ -283,7 +283,7 @@ impl DockerExecConnection {
                     dst_path
                 )
             }
-            _ => Ok(Some(AppVersion::global(cx))),
+            _ => Ok(Some(AppVersion::upstream(cx))),
         })?;
 
         let tmp_path_gz = paths::remote_server_dir_relative().join(
