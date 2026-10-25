@@ -81,6 +81,16 @@ impl AvailableLanguages {
                     .native_fallback
                     .clone()
                     .unwrap_or_else(|| Box::new(existing_language.clone()));
+                let can_layer = grammar.is_some()
+                    && grammar == native_fallback.grammar
+                    && native_fallback
+                        .matcher
+                        .path_suffixes
+                        .iter()
+                        .all(|suffix| matcher.path_suffixes.contains(suffix));
+                if !can_layer {
+                    return None;
+                }
                 let native_load = native_fallback.load.clone();
                 let ext_load = load;
                 let merged_load: LanguageLoader = Arc::new(move || {
