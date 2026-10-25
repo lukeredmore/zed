@@ -41,4 +41,5 @@ db = { workspace = true, features = ["test-support"] }
 futures.workspace = true
 gpui = { workspace = true, "features" = ["test-support"] }
 parking_lot.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
 zlog.workspace = true
