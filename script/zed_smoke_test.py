@@ -3,14 +3,18 @@
 
 Mounts the DMG, verifies the Zed.app bundle structure and Info.plist metadata,
 validates `zed --system-specs` version formatting (ensuring the auto-updater
-does not enter an infinite update loop), verifies single-instance TCP handshake
-isolation from vanilla Zed and delegation to modded Zed, and confirms the app
-stays alive when launched with no arguments from $HOME.
+does not enter an infinite update loop), and verifies the macOS single-instance
+TCP handshake:
+- Case 1: a vanilla Zed holds its port. Modded Zed must start, bind its own
+  modded port, and stay alive when launched from $HOME.
+- Case 2: a modded Zed holds the modded port. A second modded Zed must print
+  "zed is already running" and exit.
 """
 
 import os
 import plistlib
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -19,56 +23,107 @@ import threading
 import time
 
 BASE_PORT = 43737
-MODDED_PORT_OFFSET = 400
-STABLE_CHANNEL_OFFSET = 200
+USER_BLOCK = 100
+STABLE_OFFSET = 2 * USER_BLOCK
+MODDED_PORT_OFFSET = 4 * USER_BLOCK
+VANILLA_HANDSHAKE = b"Zed Editor Stable Instance Running"
+MODDED_HANDSHAKE = b"Zed Modded Editor Stable Instance Running"
+ALREADY_RUNNING = "zed is already running"
 
 
-class FakeInstance:
-    def __init__(self, port: int, handshake: bytes):
-        self.port = port
-        self.handshake = handshake
-        self.received_payloads: list[str] = []
-        self._stop = threading.Event()
-        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server.bind(("127.0.0.1", port))
-        self._server.listen(4)
-        self._server.settimeout(0.2)
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+def user_port(port: int) -> int:
+    max_uid = 0xFFFF - port
+    return port + (os.getuid() % max_uid)
 
-    def _run(self):
-        while not self._stop.is_set():
-            try:
-                conn, _ = self._server.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            with conn:
-                conn.sendall(self.handshake)
-                chunks = []
-                while True:
-                    data = conn.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-                if chunks:
-                    self.received_payloads.append(
-                        b"".join(chunks).decode("utf-8", errors="replace")
-                    )
 
-    def close(self):
-        self._stop.set()
-        try:
-            self._server.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=1.0)
+VANILLA_PORT = user_port(BASE_PORT + STABLE_OFFSET)
+MODDED_PORT = user_port(BASE_PORT + STABLE_OFFSET + MODDED_PORT_OFFSET)
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, capture_output=True, **kwargs)
+
+
+def read_handshake(port: int, length: int, timeout: float = 0.5) -> bytes | None:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
+            conn.settimeout(timeout)
+            data = b""
+            while len(data) < length:
+                chunk = conn.recv(length - len(data))
+                if not chunk:
+                    break
+                data += chunk
+            return data
+    except OSError:
+        return None
+
+
+class FakeInstance:
+    """Answers every connection on `port` with `handshake`, like a running Zed."""
+
+    def __init__(self, port: int, handshake: bytes):
+        self.port = port
+        self.handshake = handshake
+        self.server: socket.socket | None = None
+
+    def __enter__(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server.bind(("127.0.0.1", self.port))
+        except OSError:
+            server.close()
+            if read_handshake(self.port, len(self.handshake)) == self.handshake:
+                return self
+            raise RuntimeError(
+                f"port {self.port} is held by something that is not a matching Zed"
+            )
+        server.listen()
+        self.server = server
+        threading.Thread(target=self._serve, daemon=True).start()
+        return self
+
+    def _serve(self):
+        assert self.server is not None
+        while True:
+            try:
+                conn, _ = self.server.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.sendall(self.handshake)
+                except OSError:
+                    pass
+
+    def __exit__(self, *exc):
+        if self.server:
+            self.server.close()
+
+
+def launch(binary: str, home: str) -> subprocess.Popen:
+    env = dict(os.environ, HOME=home, RUST_LOG="info")
+    env.pop("ZED_STATELESS", None)
+    return subprocess.Popen(
+        [binary],
+        cwd=home,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def stop(proc: subprocess.Popen) -> str:
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    output, _ = proc.communicate(timeout=10)
+    return output or ""
 
 
 def verify_bundle_metadata(app_path: str, zed_bin: str):
@@ -110,80 +165,54 @@ def verify_bundle_metadata(app_path: str, zed_bin: str):
     assert expected_version in specs.stdout, (
         f"Expected {expected_version!r} in --system-specs output:\n{specs.stdout}"
     )
-    print(f"[PASS] --system-specs verified ({expected_version})")
+    print(f"[PASS] --system-specs verified ({expected_version})", flush=True)
 
 
-def verify_single_instance_and_launch(zed_bin: str):
-    uid = os.getuid()
-    vanilla_port = BASE_PORT + STABLE_CHANNEL_OFFSET + uid
-    modded_port = BASE_PORT + MODDED_PORT_OFFSET + STABLE_CHANNEL_OFFSET + uid
-
-    with tempfile.TemporaryDirectory(prefix="zed-smoke-") as home:
-        env = os.environ.copy()
-        env["HOME"] = home
-        os.makedirs(os.path.join(home, "Library", "Logs", "Zed"), exist_ok=True)
-        os.makedirs(
-            os.path.join(home, "Library", "Application Support", "Zed"), exist_ok=True
-        )
-
-        # 1. Verify modded Zed does NOT connect to a running vanilla Zed instance.
-        vanilla = FakeInstance(vanilla_port, b"Zed Editor Stable Instance Running\n")
-        modded = FakeInstance(
-            modded_port, b"Zed Modded Editor Stable Instance Running\n"
-        )
-        try:
-            proc = run(
-                [zed_bin, os.path.join(home, "test.md")],
-                env=env,
-                timeout=30,
-            )
-            assert proc.returncode == 0, (
-                f"Expected exit 0 when delegating to existing modded instance, got {proc.returncode}:\n"
-                f"stdout={proc.stdout}\nstderr={proc.stderr}"
-            )
-            assert not vanilla.received_payloads, (
-                f"Modded Zed unexpectedly contacted vanilla Zed port {vanilla_port}: {vanilla.received_payloads}"
-            )
-            assert len(modded.received_payloads) == 1, (
-                f"Expected modded instance on port {modded_port} to receive 1 open payload, got {modded.received_payloads}"
-            )
-            print(
-                f"[PASS] Single-instance isolation (vanilla port {vanilla_port} untouched, modded port {modded_port} received payload)"
-            )
-        finally:
-            modded.close()
-            vanilla.close()
-
-        # 2. Verify launching with no arguments from $HOME stays alive without panicking.
-        proc = subprocess.Popen(
-            [zed_bin],
-            cwd=home,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
+def case_runs_next_to_vanilla_zed(binary: str, home: str) -> str | None:
+    with FakeInstance(VANILLA_PORT, VANILLA_HANDSHAKE):
+        proc = launch(binary, home)
+        handshake = None
+        deadline = time.time() + 20
+        while time.time() < deadline and proc.poll() is None:
+            handshake = read_handshake(MODDED_PORT, len(MODDED_HANDSHAKE))
+            if handshake == MODDED_HANDSHAKE:
+                break
+            time.sleep(0.02)
+        if handshake == MODDED_HANDSHAKE:
+            # Verify Zed stays alive past settings::init / GPUI startup
+            # when launched outside a source checkout (cwd=home).
             time.sleep(1.5)
-            poll = proc.poll()
-            if poll is not None:
-                out, err = proc.communicate(timeout=5)
-                raise AssertionError(
-                    f"Zed exited prematurely with code {poll} when launched from $HOME:\nstdout={out}\nstderr={err}"
-                )
-            print("[PASS] Zed stayed alive for 1.5s when launched with no args from $HOME")
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        early_exit = proc.poll()
+        output = stop(proc)
+    if ALREADY_RUNNING in output:
+        return f"Modded Zed handed its launch to vanilla Zed on port {VANILLA_PORT}:\n{output}"
+    if handshake != MODDED_HANDSHAKE:
+        return f"Modded Zed did not answer on port {MODDED_PORT} (got {handshake!r}):\n{output}"
+    if early_exit is not None or "panicked at" in output:
+        return (
+            f"Modded Zed crashed during startup after binding port {MODDED_PORT} "
+            f"(exit={early_exit}):\n{output}"
+        )
+    return None
 
 
-def main():
+def case_hands_off_to_running_modded_zed(binary: str, home: str) -> str | None:
+    with FakeInstance(MODDED_PORT, MODDED_HANDSHAKE):
+        proc = launch(binary, home)
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+        output = stop(proc)
+    if ALREADY_RUNNING not in output:
+        return f"A second modded Zed did not hand off to the running one on port {MODDED_PORT}:\n{output}"
+    return None
+
+
+def main() -> int:
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} <path/to/Zed.dmg>", file=sys.stderr)
-        sys.exit(2)
+        return 2
 
     dmg_path = os.path.abspath(sys.argv[1])
     assert os.path.isfile(dmg_path), f"DMG not found: {dmg_path}"
@@ -191,6 +220,7 @@ def main():
     mount_dir = tempfile.mkdtemp(prefix="zed-dmg-mount-")
     app_copy_dir = tempfile.mkdtemp(prefix="zed-app-copy-")
     attached = False
+    failures: list[str] = []
     try:
         attach = run(
             [
@@ -215,14 +245,33 @@ def main():
         zed_bin = os.path.join(local_app, "Contents", "MacOS", "zed")
 
         verify_bundle_metadata(local_app, zed_bin)
-        verify_single_instance_and_launch(zed_bin)
-        print("[PASS] All Zed.dmg smoke tests passed.")
+
+        for case in (
+            case_runs_next_to_vanilla_zed,
+            case_hands_off_to_running_modded_zed,
+        ):
+            with tempfile.TemporaryDirectory(prefix="zed-smoke-home-") as home:
+                os.makedirs(os.path.join(home, "Library", "Logs", "Zed"), exist_ok=True)
+                os.makedirs(
+                    os.path.join(home, "Library", "Application Support", "Zed"),
+                    exist_ok=True,
+                )
+                error = case(zed_bin, home)
+            print(f"[{'FAIL' if error else 'PASS'}] {case.__name__}", flush=True)
+            if error:
+                failures.append(error)
     finally:
         if attached:
             run(["hdiutil", "detach", "-force", mount_dir], timeout=30)
         shutil.rmtree(mount_dir, ignore_errors=True)
         shutil.rmtree(app_copy_dir, ignore_errors=True)
 
+    for error in failures:
+        print(error, file=sys.stderr)
+    if not failures:
+        print("[PASS] All Zed.dmg smoke tests passed.", flush=True)
+    return 1 if failures else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
