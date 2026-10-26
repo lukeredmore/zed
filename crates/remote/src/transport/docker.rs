@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use collections::HashMap;
 use parking_lot::Mutex;
-use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, ReleaseChannel, RemoteServerRelease};
 use semver::Version as SemanticVersion;
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -82,10 +82,15 @@ impl DockerExecConnection {
             path_style: None,
             shell: "sh".to_owned(),
         };
-        let (release_channel, version, commit) = cx.update(|cx| {
+        let (
+            RemoteServerRelease {
+                channel: release_channel,
+                version,
+            },
+            commit,
+        ) = cx.update(|cx| {
             (
-                ReleaseChannel::global(cx),
-                AppVersion::upstream(cx),
+                RemoteServerRelease::global(cx),
                 AppCommitSha::try_global(cx),
             )
         });
@@ -275,16 +280,16 @@ impl DockerExecConnection {
             return Ok(dst_path.into());
         }
 
-        let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
+        let wanted_version = match release_channel {
+            ReleaseChannel::Nightly => None,
             ReleaseChannel::Dev => {
                 anyhow::bail!(
                     "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
                     dst_path
                 )
             }
-            _ => Ok(Some(AppVersion::upstream(cx))),
-        })?;
+            ReleaseChannel::Preview | ReleaseChannel::Stable => Some(version.clone()),
+        };
 
         let tmp_path_gz = paths::remote_server_dir_relative().join(
             RelPath::from_unix_str(&format!(

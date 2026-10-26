@@ -23,6 +23,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify pinned remote server release exists
+        run: |
+          read -r CHANNEL VERSION < crates/release_channel/REMOTE_SERVER_RELEASE
+          for OS_ARCH in "linux x86_64" "linux aarch64" "macos aarch64"; do
+            read -r OS ARCH <<< "${OS_ARCH}"
+            URL="https://cloud.zed.dev/releases/${CHANNEL}/${VERSION}/asset?asset=zed-remote-server&os=${OS}&arch=${ARCH}"
+            curl --fail --silent --show-error --output /dev/null "${URL}" \
+              || { echo "::error::zed-remote-server ${OS}-${ARCH} not found for ${CHANNEL} ${VERSION}"; exit 1; }
+          done
+
       - name: Install build dependencies
         run: |
           brew install cmake protobuf

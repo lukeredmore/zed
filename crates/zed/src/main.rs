@@ -316,14 +316,6 @@ fn main() {
         .or_else(|| release_channel::bundled_info_plist_value("CFBundleShortVersionString"))
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     let app_version = AppVersion::load(&pkg_version, version.as_deref(), app_commit_sha.clone());
-    let upstream_zed_version = release_channel::bundled_info_plist_value("ZedUpstreamVersion")
-        .or_else(|| release_channel::bundled_info_plist_value("CFBundleShortVersionString"))
-        .and_then(|version| version.split('+').next()?.parse().ok())
-        .unwrap_or_else(|| {
-            env!("CARGO_PKG_VERSION")
-                .parse()
-                .expect("invalid version in Cargo.toml")
-        });
 
     if args.system_specs {
         let system_specs = system_specs::SystemSpecs::new_stateless(
@@ -520,7 +512,6 @@ fn main() {
         zed_actions::init();
 
         release_channel::init(app_version, cx);
-        AppVersion::set_upstream(upstream_zed_version, cx);
         gpui_tokio::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
