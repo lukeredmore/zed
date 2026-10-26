@@ -126,10 +126,6 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
-struct GlobalUpstreamZedVersion(Version);
-
-impl Global for GlobalUpstreamZedVersion {}
-
 /// The version of Zed.
 pub struct AppVersion;
 
@@ -163,26 +159,58 @@ impl AppVersion {
         version
     }
 
-    /// Sets the vanilla Zed release version that this build is based on.
-    pub fn set_upstream(version: Version, cx: &mut App) {
-        cx.set_global(GlobalUpstreamZedVersion(version));
-    }
-
-    /// Returns the vanilla Zed release version, which selects the vanilla remote server.
-    pub fn upstream(cx: &App) -> Version {
-        if cx.has_global::<GlobalUpstreamZedVersion>() {
-            cx.global::<GlobalUpstreamZedVersion>().0.clone()
-        } else {
-            Self::global(cx)
-        }
-    }
-
     /// Returns the global version number.
     pub fn global(cx: &App) -> Version {
         if cx.has_global::<GlobalAppVersion>() {
             cx.global::<GlobalAppVersion>().0.clone()
         } else {
             Version::new(0, 0, 0)
+        }
+    }
+}
+
+/// The vanilla Zed release whose `zed-remote-server` this build downloads for remote projects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteServerRelease {
+    /// The release channel to download the remote server from.
+    pub channel: ReleaseChannel,
+    /// The release version to download the remote server for.
+    pub version: Version,
+}
+
+// This fork's own version does not exist on zed.dev, so remote projects use a pinned vanilla
+// release that is protocol-compatible with the fork's base commit.
+static PINNED_REMOTE_SERVER_RELEASE: LazyLock<RemoteServerRelease> = LazyLock::new(|| {
+    let value = include_str!("../REMOTE_SERVER_RELEASE");
+    match RemoteServerRelease::parse(value) {
+        Some(release) => release,
+        None => panic!("invalid REMOTE_SERVER_RELEASE {value:?}, expected `<channel> <version>`"),
+    }
+});
+
+impl RemoteServerRelease {
+    /// Parses `<channel> <version>`, for example `preview 1.26.1`.
+    pub fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split_whitespace();
+        let channel = ReleaseChannel::from_str(parts.next()?).ok()?;
+        let version = parts.next()?.parse().ok()?;
+        parts.next().is_none().then_some(Self { channel, version })
+    }
+
+    /// Returns the remote server release for the running app.
+    ///
+    /// Dev and Nightly builds keep their own channel and version, so they still build or
+    /// download a matching server. Preview and Stable builds use the pinned vanilla release.
+    pub fn global(cx: &App) -> Self {
+        let channel = ReleaseChannel::global(cx);
+        match channel {
+            ReleaseChannel::Dev | ReleaseChannel::Nightly => Self {
+                channel,
+                version: AppVersion::global(cx),
+            },
+            ReleaseChannel::Preview | ReleaseChannel::Stable => {
+                PINNED_REMOTE_SERVER_RELEASE.clone()
+            }
         }
     }
 }
@@ -335,7 +363,38 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::ReleaseChannel;
+    use super::{ReleaseChannel, RemoteServerRelease};
+    use semver::Version;
+
+    #[test]
+    fn test_pinned_remote_server_release_is_valid() {
+        let release = RemoteServerRelease::parse(include_str!("../REMOTE_SERVER_RELEASE"));
+        assert!(
+            matches!(
+                release,
+                Some(RemoteServerRelease {
+                    channel: ReleaseChannel::Preview | ReleaseChannel::Stable,
+                    ..
+                })
+            ),
+            "REMOTE_SERVER_RELEASE must name a preview or stable release: {release:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_remote_server_release() {
+        assert_eq!(
+            RemoteServerRelease::parse("preview 1.26.1\n"),
+            Some(RemoteServerRelease {
+                channel: ReleaseChannel::Preview,
+                version: Version::new(1, 26, 1),
+            })
+        );
+        assert_eq!(RemoteServerRelease::parse("preview"), None);
+        assert_eq!(RemoteServerRelease::parse("beta 1.26.1"), None);
+        assert_eq!(RemoteServerRelease::parse("stable 1.26"), None);
+        assert_eq!(RemoteServerRelease::parse("stable 1.26.1 extra"), None);
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {

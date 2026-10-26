@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use collections::HashMap;
 use futures::channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
 use gpui::{App, AppContext as _, AsyncApp, Task};
-use release_channel::{AppVersion, ReleaseChannel};
+use release_channel::{ReleaseChannel, RemoteServerRelease};
 use rpc::proto::Envelope;
 use semver::Version;
 use smol::{
@@ -73,8 +73,10 @@ impl WslRemoteConnection {
             connection_options.distro_name,
             connection_options.user
         );
-        let (release_channel, version) =
-            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::upstream(cx)));
+        let RemoteServerRelease {
+            channel: release_channel,
+            version,
+        } = cx.update(|cx| RemoteServerRelease::global(cx));
 
         let mut this = Self {
             connection_options,
@@ -276,7 +278,7 @@ impl WslRemoteConnection {
 
         let wanted_version = match release_channel {
             ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
-            _ => Some(cx.update(|cx| AppVersion::upstream(cx))),
+            ReleaseChannel::Preview | ReleaseChannel::Stable => Some(version.clone()),
         };
 
         let src_path = delegate

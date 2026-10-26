@@ -15,7 +15,7 @@ use futures::{
 use gpui::{App, AppContext as _, AsyncApp, Task};
 use parking_lot::Mutex;
 use paths::remote_server_dir_relative;
-use release_channel::{AppVersion, ReleaseChannel};
+use release_channel::{ReleaseChannel, RemoteServerRelease};
 use rpc::proto::Envelope;
 use semver::Version;
 pub use settings_content::SshPortForwardOption;
@@ -1001,8 +1001,10 @@ impl SshRemoteConnection {
             ssh_home_dir,
         };
 
-        let (release_channel, version) =
-            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::upstream(cx)));
+        let RemoteServerRelease {
+            channel: release_channel,
+            version,
+        } = cx.update(|cx| RemoteServerRelease::global(cx));
         this.remote_binary_path = Some(
             this.ensure_server_binary(&delegate, release_channel, version, cx)
                 .await?,
@@ -1074,16 +1076,16 @@ impl SshRemoteConnection {
             return Ok(dst_path.into());
         }
 
-        let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
+        let wanted_version = match release_channel {
+            ReleaseChannel::Nightly => None,
             ReleaseChannel::Dev => {
                 anyhow::bail!(
                     "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
                     dst_path
                 )
             }
-            _ => Ok(Some(AppVersion::upstream(cx))),
-        })?;
+            ReleaseChannel::Preview | ReleaseChannel::Stable => Some(version.clone()),
+        };
 
         let tmp_path_compressed = remote_server_dir_relative().join(
             RelPath::from_unix_str(&format!(
