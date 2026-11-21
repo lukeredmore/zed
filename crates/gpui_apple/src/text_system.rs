@@ -54,7 +54,7 @@ use {
     std::sync::OnceLock,
 };
 
-use crate::open_type::apply_features_and_fallbacks;
+use crate::open_type::{apply_features_and_fallbacks, sanitize_gdef_spacing_marks};
 
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
@@ -298,6 +298,7 @@ impl AppleTextSystemState {
         for font in family.fonts() {
             let mut font = font.load()?;
 
+            sanitize_gdef_spacing_marks(&mut font)?;
             apply_features_and_fallbacks(&mut font, features, fallbacks)?;
             // This block contains a precautionary fix to guard against loading fonts
             // that might cause panics due to `.unwrap()`s up the chain.
@@ -775,8 +776,17 @@ mod lenient_font_attributes {
 #[cfg(test)]
 mod tests {
     use crate::AppleTextSystem;
+    use core_foundation::{
+        attributed_string::CFMutableAttributedString,
+        base::{CFRange, TCFType},
+        data::{CFData, CFDataRef},
+        string::CFString,
+    };
+    use core_graphics::{data_provider::CGDataProvider, font::CGFont};
+    use core_text::{font::CTFontRef, line::CTLine, string_attributes::kCTFontAttributeName};
+    use font_kit::source::SystemSource;
     use gpui::{FontFallbacks, FontFeatures, FontRun, GlyphId, PlatformTextSystem, font, px};
-    use std::sync::Arc;
+    use std::{borrow::Cow, sync::Arc};
 
     #[test]
     fn test_reload_family_with_features_and_fallbacks() {
@@ -932,5 +942,251 @@ mod tests {
         let layout = fonts.layout_line(text, px(16.), font_runs);
         assert_eq!(layout.len, 0);
         assert!(layout.runs.is_empty());
+    }
+
+    fn replace_subslice(haystack: &mut [u8], needle: &[u8], replacement: &[u8]) {
+        assert_eq!(needle.len(), replacement.len());
+        let mut index = 0;
+        while index + needle.len() <= haystack.len() {
+            if &haystack[index..index + needle.len()] == needle {
+                haystack[index..index + needle.len()].copy_from_slice(replacement);
+                index += needle.len();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn build_synthetic_broken_gdef_menlo(family_name: &str, gdef_format: u16) -> Vec<u8> {
+        assert_eq!(family_name.len(), 5);
+        unsafe extern "C" {
+            fn CTFontCopyTable(font: CTFontRef, table: u32, options: u32) -> CFDataRef;
+        }
+
+        let menlo = SystemSource::new()
+            .select_family_by_name("Menlo")
+            .unwrap()
+            .fonts()[0]
+            .load()
+            .unwrap();
+        let backtick_gid = u16::try_from(menlo.glyph_for_char('`').unwrap()).unwrap();
+        let combining_grave_gid = u16::try_from(menlo.glyph_for_char('\u{0300}').unwrap()).unwrap();
+        let ct_menlo = menlo.native_font();
+
+        let keep_tags: [[u8; 4]; 10] = [
+            *b"OS/2", *b"cmap", *b"glyf", *b"head", *b"hhea", *b"hmtx", *b"loca", *b"maxp",
+            *b"name", *b"post",
+        ];
+        let mut tables: Vec<(u32, Vec<u8>)> = Vec::new();
+        for tag_bytes in keep_tags {
+            let tag = u32::from_be_bytes(tag_bytes);
+            let data_ref = unsafe { CTFontCopyTable(ct_menlo.as_concrete_TypeRef(), tag, 0) };
+            assert!(!data_ref.is_null(), "missing table {:?}", tag_bytes);
+            let mut bytes = unsafe { CFData::wrap_under_create_rule(data_ref) }
+                .bytes()
+                .to_vec();
+            if tag_bytes == *b"name" {
+                replace_subslice(&mut bytes, b"Menlo", family_name.as_bytes());
+                let menlo_utf16 = [0, b'M', 0, b'e', 0, b'n', 0, b'l', 0, b'o'];
+                let mut target_utf16 = [0u8; 10];
+                for (i, &b) in family_name.as_bytes().iter().enumerate() {
+                    target_utf16[i * 2 + 1] = b;
+                }
+                replace_subslice(&mut bytes, &menlo_utf16, &target_utf16);
+            } else if tag_bytes == *b"head" {
+                bytes[8..12].fill(0);
+            }
+            tables.push((tag, bytes));
+        }
+
+        let gdef = match gdef_format {
+            1 => {
+                let min_gid = backtick_gid.min(combining_grave_gid);
+                let max_gid = backtick_gid.max(combining_grave_gid);
+                let count = max_gid - min_gid + 1;
+                let mut gdef = vec![0, 1, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0];
+                gdef.extend_from_slice(&1u16.to_be_bytes());
+                gdef.extend_from_slice(&min_gid.to_be_bytes());
+                gdef.extend_from_slice(&count.to_be_bytes());
+                for gid in min_gid..=max_gid {
+                    let class: u16 = if gid == backtick_gid || gid == combining_grave_gid {
+                        3
+                    } else {
+                        1
+                    };
+                    gdef.extend_from_slice(&class.to_be_bytes());
+                }
+                gdef
+            }
+            2 => {
+                let first_gid = backtick_gid.min(combining_grave_gid);
+                let second_gid = backtick_gid.max(combining_grave_gid);
+                let mut gdef = vec![0, 1, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0];
+                gdef.extend_from_slice(&2u16.to_be_bytes());
+                gdef.extend_from_slice(&2u16.to_be_bytes());
+                for gid in [first_gid, second_gid] {
+                    gdef.extend_from_slice(&gid.to_be_bytes());
+                    gdef.extend_from_slice(&gid.to_be_bytes());
+                    gdef.extend_from_slice(&3u16.to_be_bytes());
+                }
+                gdef
+            }
+            _ => unreachable!("unsupported test GDEF format"),
+        };
+        tables.push((u32::from_be_bytes(*b"GDEF"), gdef));
+
+        // Minimal GPOS v1.0 header + DFLT DefaultLangSys so CoreText enables GPOS zero_width_marks.
+        let gpos: Vec<u8> = vec![
+            0, 1, 0, 0, 0, 10, 0, 28, 0, 30, // header
+            0, 1, b'D', b'F', b'L', b'T', 0, 8, // ScriptList
+            0, 4, 0, 0, // ScriptTable
+            0, 0, 0xFF, 0xFF, 0, 0, // LangSysTable
+            0, 0, // FeatureList
+            0, 0, // LookupList
+        ];
+        tables.push((u32::from_be_bytes(*b"GPOS"), gpos));
+
+        tables.sort_by_key(|(tag, _)| *tag);
+        let num_tables = u16::try_from(tables.len()).unwrap();
+        let mut search_range = 16u16;
+        let mut entry_selector = 0u16;
+        while search_range * 2 <= num_tables * 16 {
+            search_range *= 2;
+            entry_selector += 1;
+        }
+        let range_shift = num_tables * 16 - search_range;
+
+        let checksum = |bytes: &[u8]| -> u32 {
+            let mut sum = 0u32;
+            for chunk in bytes.chunks(4) {
+                let mut word = [0u8; 4];
+                word[..chunk.len()].copy_from_slice(chunk);
+                sum = sum.wrapping_add(u32::from_be_bytes(word));
+            }
+            sum
+        };
+
+        let mut sfnt = Vec::new();
+        sfnt.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        sfnt.extend_from_slice(&num_tables.to_be_bytes());
+        sfnt.extend_from_slice(&search_range.to_be_bytes());
+        sfnt.extend_from_slice(&entry_selector.to_be_bytes());
+        sfnt.extend_from_slice(&range_shift.to_be_bytes());
+
+        let mut offset = 12 + usize::from(num_tables) * 16;
+        let mut head_offset = 0usize;
+        for (tag, data) in &tables {
+            if *tag == u32::from_be_bytes(*b"head") {
+                head_offset = offset;
+            }
+            sfnt.extend_from_slice(&tag.to_be_bytes());
+            sfnt.extend_from_slice(&checksum(data).to_be_bytes());
+            sfnt.extend_from_slice(&u32::try_from(offset).unwrap().to_be_bytes());
+            sfnt.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            offset += (data.len() + 3) & !3;
+        }
+        for (_, data) in &tables {
+            sfnt.extend_from_slice(data);
+            let pad = (4 - (data.len() % 4)) % 4;
+            sfnt.resize(sfnt.len() + pad, 0);
+        }
+        let adj = 0xB1B0_AFBAu32.wrapping_sub(checksum(&sfnt));
+        sfnt[head_offset + 8..head_offset + 12].copy_from_slice(&adj.to_be_bytes());
+        sfnt
+    }
+
+    #[test]
+    fn test_gdef_spacing_mark_sanitization_restores_backtick_advances() {
+        for (family_name, gdef_format) in [("Gdef1", 1u16), ("Gdef2", 2u16)] {
+            let sfnt = build_synthetic_broken_gdef_menlo(family_name, gdef_format);
+
+            // Confirm the unsanitized synthetic font triggers CoreText zero-width mark collapse.
+            let raw_cg =
+                CGFont::from_data_provider(CGDataProvider::from_buffer(Arc::new(sfnt.clone())))
+                    .unwrap();
+            let raw_ct = font_kit::loaders::core_text::Font::from_core_graphics_font(raw_cg)
+                .native_font()
+                .clone_with_font_size(14.0);
+            let mut raw_attr = CFMutableAttributedString::new();
+            raw_attr.replace_str(&CFString::new("```bash"), CFRange::init(0, 0));
+            let len = raw_attr.char_len();
+            unsafe {
+                raw_attr.set_attribute(CFRange::init(0, len), kCTFontAttributeName, &raw_ct);
+            }
+            let raw_line = CTLine::new_with_attributed_string(raw_attr.as_concrete_TypeRef());
+            let raw_runs = raw_line.glyph_runs();
+            let raw_run = raw_runs.get(0).unwrap();
+            let raw_positions = raw_run.positions();
+            assert_eq!(
+                raw_positions[0].x, 0.0,
+                "expected first backtick at x=0 in {family_name}"
+            );
+            assert_eq!(
+                raw_positions[3].x, 0.0,
+                "expected CoreText to collapse 3 backticks onto 'b' before sanitization in {family_name}"
+            );
+
+            // Loading through AppleTextSystem should sanitize GDEF and restore full advances.
+            let fonts = AppleTextSystem::new();
+            fonts.add_fonts(vec![Cow::Owned(sfnt)]).unwrap();
+            let font_id = fonts.font_id(&font(family_name)).unwrap();
+
+            let layout_m = fonts.layout_line("m", px(14.0), &[FontRun { font_id, len: 1 }]);
+            let mono_advance = f32::from(layout_m.width);
+            assert!(mono_advance > 5.0, "unexpected advance {mono_advance}");
+
+            for sample in ["```bash", "`${MAIN_REPO_ROOT}` (`main`)"] {
+                let layout = fonts.layout_line(
+                    sample,
+                    px(14.0),
+                    &[FontRun {
+                        font_id,
+                        len: sample.len(),
+                    }],
+                );
+                let glyphs: Vec<_> = layout
+                    .runs
+                    .iter()
+                    .flat_map(|run| run.glyphs.iter())
+                    .collect();
+                assert_eq!(glyphs.len(), sample.chars().count());
+                for (index, pair) in glyphs.windows(2).enumerate() {
+                    let delta = f32::from(pair[1].position.x - pair[0].position.x);
+                    assert!(
+                        (delta - mono_advance).abs() < 0.5,
+                        "{family_name} sample {sample:?} glyph {index} delta={delta} expected={mono_advance}"
+                    );
+                }
+                let expected_width = mono_advance * sample.chars().count() as f32;
+                assert!(
+                    (f32::from(layout.width) - expected_width).abs() < 0.5,
+                    "{family_name} sample {sample:?} width={} expected={expected_width}",
+                    f32::from(layout.width)
+                );
+            }
+
+            // True combining marks (e.g. U+0300) must remain zero-advance marks.
+            let combining = "x\u{0300}a";
+            let combining_layout = fonts.layout_line(
+                combining,
+                px(14.0),
+                &[FontRun {
+                    font_id,
+                    len: combining.len(),
+                }],
+            );
+            let combining_glyphs: Vec<_> = combining_layout
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter())
+                .collect();
+            assert_eq!(combining_glyphs.len(), 3);
+            let x_pos = f32::from(combining_glyphs[0].position.x);
+            let a_pos = f32::from(combining_glyphs[2].position.x);
+            assert!(
+                (a_pos - x_pos - mono_advance).abs() < 0.5,
+                "{family_name} expected U+0300 to remain zero-advance: x={x_pos}, a={a_pos}, mono={mono_advance}"
+            );
+        }
     }
 }
